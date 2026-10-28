@@ -1,0 +1,36 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Django / app runtime
+*.log
+media/
+staticfiles/
+db.sqlite3
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+thumbs.db
+
+# Tooling caches
+node_modules/
+.ipynb_checkpoints/
