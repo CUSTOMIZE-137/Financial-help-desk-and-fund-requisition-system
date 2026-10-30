@@ -1,0 +1,49 @@
+{% load static %}
+<!-- Shared page shell: assets, role-aware navigation, flash messages, and content. -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Financial Help Desk{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}?v=2">
+</head>
+<body>
+  {% block header %}
+    <header class="topbar">
+      <a class="brand" href="{% url 'dashboard' %}">
+        <img class="brand-logo" src="{% static 'images/organization-logo.png' %}" alt="">
+        <span class="brand-name">Finance<span>Desk</span></span>
+      </a>
+      {% if request.user.is_authenticated %}
+        <nav aria-label="Main navigation">
+          <a href="{% url 'dashboard' %}">Dashboard</a>
+          {% if show_approval_queue %}<a href="{% url 'approval-queue' %}">Approval queue</a>{% endif %}
+          {% if request.user.role == "EMPLOYEE" or request.user.role == "ADMIN" or request.user.is_superuser %}
+            <a class="nav-cta" href="{% url 'requisition-create' %}">New request</a>
+          {% endif %}
+        </nav>
+        <div class="user-menu">
+          <span>{{ request.user.get_full_name|default:request.user.username }}</span>
+          <form method="post" action="{% url 'logout' %}">
+            {% csrf_token %}
+            <button class="link-button" type="submit">Sign out</button>
+          </form>
+        </div>
+      {% endif %}
+    </header>
+  {% endblock %}
+  <main class="page">
+    <!-- Messages are rendered once here so every page can show workflow feedback. -->
+    {% if messages %}
+      <div class="messages" role="status">
+        {% for message in messages %}
+          <p class="message {{ message.tags }}">{{ message }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="footer">Financial Help Desk &amp; Fund Requisition System</footer>
+</body>
+</html>

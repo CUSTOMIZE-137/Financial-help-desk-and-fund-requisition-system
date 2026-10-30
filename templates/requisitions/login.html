@@ -1,0 +1,23 @@
+{% extends "requisitions/base.html" %}
+{% load static %}
+{% block title %}Sign in · FinanceDesk{% endblock %}
+{% block header %}{% endblock %}
+{% block content %}
+<!-- The form posts credentials with CSRF protection; the view reports invalid logins. -->
+<section class="auth-card">
+  <div class="auth-brand">
+    <img src="{% static 'images/organization-logo.png' %}" alt="">
+    <span>Finance<span>Desk</span></span>
+  </div>
+  <h1>Welcome back</h1>
+  <p class="muted">Sign in to manage requests, approvals, and accountability.</p>
+  <form method="post">
+    {% csrf_token %}
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button class="button primary full" type="submit">Sign in</button>
+  </form>
+</section>
+{% endblock %}

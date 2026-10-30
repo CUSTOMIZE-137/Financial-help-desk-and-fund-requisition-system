@@ -1,0 +1,70 @@
+{% extends "requisitions/base.html" %}
+{% block title %}{{ requisition.title }} · FinanceDesk{% endblock %}
+{% block content %}
+<!-- Request summary and controls are determined by server-side visibility checks. -->
+<div class="detail-heading">
+  <div><a class="back-link" href="{% url 'dashboard' %}">← Dashboard</a><p class="eyebrow">REQUISITION #{{ requisition.pk }}</p><h1>{{ requisition.title }}</h1><p class="muted">Requested by {{ requisition.requestor.get_full_name|default:requisition.requestor.username }} on {{ requisition.requested_at|date:"M j, Y" }}</p></div>
+  <span class="badge large">{{ requisition.get_status_display }}</span>
+</div>
+<div class="detail-grid">
+  <section class="panel">
+    <div class="panel-heading"><div><p class="eyebrow">REQUEST DETAILS</p><h2>Summary</h2></div>
+    {% if can_edit %}<a class="button secondary" href="{% url 'requisition-edit' requisition.pk %}">Edit</a>{% endif %}</div>
+    <dl class="details">
+      <div><dt>Amount</dt><dd>{{ requisition.currency }} {{ requisition.amount|floatformat:2 }}</dd></div>
+      <div><dt>Project</dt><dd>{{ requisition.project.code }} · {{ requisition.project.name }}</dd></div>
+      <div><dt>Budget line</dt><dd>{{ requisition.budget_line.code }} · {{ requisition.budget_line.category }}</dd></div>
+      <div><dt>Department</dt><dd>{{ requisition.department|default:"—" }}</dd></div>
+      <div><dt>Due date</dt><dd>{{ requisition.due_date|date:"M j, Y"|default:"—" }}</dd></div>
+      <div class="wide"><dt>Purpose and justification</dt><dd class="preserve-lines">{{ requisition.description }}</dd></div>
+      {% if requisition.last_comment %}<div class="wide"><dt>Latest comment</dt><dd class="preserve-lines">{{ requisition.last_comment }}</dd></div>{% endif %}
+      {% if requisition.rejection_reason %}<div class="wide"><dt>Rejection reason</dt><dd class="preserve-lines">{{ requisition.rejection_reason }}</dd></div>{% endif %}
+    </dl>
+  </section>
+  {% if allowed_actions %}
+  <section class="panel action-panel">
+    <p class="eyebrow">NEXT STEP</p><h2>Take action</h2>
+    {% if "SUBMIT_ACCOUNTABILITY" in allowed_actions %}
+      <a class="button primary full" href="{% url 'accountability-create' requisition.pk %}">Submit accountability evidence</a>
+    {% else %}
+      <form method="post" action="{% url 'requisition-action' requisition.pk %}">
+        {% csrf_token %}
+        {% if "REQUEST_REVISION" in allowed_actions or "REJECT" in allowed_actions %}<label for="comments">Comment</label><textarea id="comments" name="comments" rows="3" placeholder="Add context for this action"></textarea>{% endif %}
+        <div class="action-buttons">
+          {% for action in allowed_actions %}
+            {% if action != "SUBMIT_ACCOUNTABILITY" %}
+              <button class="button {% if action == 'REJECT' %}danger{% else %}primary{% endif %}" name="action" value="{{ action }}" type="submit">{% if action == "REQUEST_REVISION" %}Request Revision{% elif action == "FINALIZE_ACCOUNTABILITY" %}Finalize Accountability{% elif action == "RESUBMIT" %}Submit{% else %}{{ action|title }}{% endif %}</button>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </form>
+    {% endif %}
+  </section>
+  {% endif %}
+</div>
+<!-- Accountability evidence appears after disbursement; workflow events remain auditable. -->
+{% if accountability %}
+<section class="panel">
+  <p class="eyebrow">LIQUIDATION</p><h2>Accountability submission</h2>
+  <dl class="details">
+    <div><dt>Actual spend</dt><dd>{{ requisition.currency }} {{ accountability.actual_amount_spent|floatformat:2 }}</dd></div>
+    <div><dt>Submitted</dt><dd>{{ accountability.submitted_at|date:"M j, Y H:i" }}</dd></div>
+    <div class="wide"><dt>Activity report</dt><dd class="preserve-lines">{{ accountability.activity_report }}</dd></div>
+    {% if accountability.receipt_file %}<div><dt>Receipt</dt><dd><a href="{% url 'protected-file' 'receipt' accountability.pk %}">Download receipt</a></dd></div>{% endif %}
+    {% if accountability.invoice_file %}<div><dt>Invoice</dt><dd><a href="{% url 'protected-file' 'invoice' accountability.pk %}">Download invoice</a></dd></div>{% endif %}
+  </dl>
+</section>
+{% endif %}
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">AUDIT HISTORY</p><h2>Status timeline</h2></div></div>
+  {% if logs %}
+    <ol class="timeline">
+      {% for log in logs %}
+        <li><span class="timeline-mark"></span><div><div class="timeline-title">{{ log.get_action_display }} <span class="muted">· {{ log.get_new_status_display }}</span></div><p class="muted">{{ log.actor.get_full_name|default:log.actor.username }} · {{ log.timestamp|date:"M j, Y H:i" }}</p>{% if log.comments %}<p class="preserve-lines">{{ log.comments }}</p>{% endif %}</div></li>
+      {% endfor %}
+    </ol>
+  {% else %}
+    <p class="muted">No workflow actions recorded yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

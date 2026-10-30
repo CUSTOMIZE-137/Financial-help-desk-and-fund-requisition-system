@@ -1,0 +1,18 @@
+{% extends "requisitions/base.html" %}
+{% block title %}{% if is_edit %}Edit{% else %}New{% endif %} requisition · FinanceDesk{% endblock %}
+{% block content %}
+<!-- The same form supports new drafts and owner edits after a revision request. -->
+<div class="narrow">
+  <a class="back-link" href="{% if requisition %}{% url 'requisition-detail' requisition.pk %}{% else %}{% url 'dashboard' %}{% endif %}">← Back</a>
+  <p class="eyebrow">FUND REQUEST</p>
+  <h1>{% if is_edit %}Update requisition{% else %}Create a requisition{% endif %}</h1>
+  <p class="muted">Provide a clear purpose, project, budget line, and itemized request amount.</p>
+  <section class="panel form-panel">
+    <form method="post">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <div class="form-actions"><a class="button secondary" href="{% url 'dashboard' %}">Cancel</a><button class="button primary" type="submit">Save draft</button></div>
+    </form>
+  </section>
+</div>
+{% endblock %}

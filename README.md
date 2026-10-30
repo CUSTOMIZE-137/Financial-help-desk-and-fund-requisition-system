@@ -1,143 +1,78 @@
-# 💳 Financial Requisition & Help Desk System
+# Financial Help Desk & Fund Requisition System
 
-An enterprise financial help desk and fund requisition system designed to streamline, track, and audit organizational fund requests. The system routes requisitions through a strict 5-stage sequential approval chain while maintaining data integrity, accountability loops, and audit trails.
+A Django web application for submitting, reviewing, disbursing, and reconciling organizational fund requests. It includes a role-based dashboard, a five-stage approval workflow, an authenticated REST API, and an append-only application audit history.
 
----
+## Workflow
 
-## 🔄 Approval Workflow Strategy
+1. **Employee** creates a draft with its project, budget line, justification, and amount, then submits it.
+2. **Supervisor** reviews departmental need and budget alignment.
+3. **M&E Officer** checks the request against project outputs and indicators.
+4. **Program Director** provides final program approval.
+5. **Finance** checks available funds and records disbursement.
+6. **Requester** submits actual spend, an activity report, and supporting receipts or invoices.
+7. **Finance** reviews the liquidation and closes the request.
 
-Fund requisitions progress through five distinct sequential stages:
+At any approval stage, an approver can request a revision or reject the request. Revision comments and every status transition are recorded in the request history. Disbursement reserves the approved amount against its budget line; final accountability reconciles that amount to actual spending.
 
-### Workflow Summary Diagram
+## Features
 
-```text
-[1. Employee / Officer]
-│ Submits request & TORs
-▼
-[2. Supervisor]
-│ Departmental review & budget alignment
-▼
-[3. Monitoring & Evaluation (M&E)]
-│ Strategic verification & project logframe alignment
-▼
-[4. Program Director]
-│ Final strategic sign-off & authorization
-▼
-[5. Finance]
-│ Pre-audit validation, payment processing & disbursement
-▼
-[Awaiting Accountability]
-│ Requester uploads liquidation receipts & activity report
-▼
-[Completed]
+- Role-aware dashboard and approval queue for employees, supervisors, M&E, program directors, finance staff, and administrators.
+- Server-enforced status transitions, department-scoped supervisor approvals, and date-limited delegation.
+- Project and budget-line tracking, with available funds rechecked at disbursement.
+- Accountability reports and receipt/invoice uploads, limited to PDF and common image formats, up to 15 MB per file.
+- Read-only audit history and protected, authenticated file downloads.
+- Django admin for user, project, and budget setup.
+- REST API under `/api/` using Django session or HTTP Basic authentication.
+
+## Requirements
+
+- Python 3.10+
+- SQLite for a local development database (included with Python), or PostgreSQL
+
+## Local setup
+
+```bash
+git clone https://github.com/CUSTOMIZE-137/financial-help-desk-and-fund-requisition-system.git
+cd financial-help-desk-and-fund-requisition-system
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python manage.py migrate
+python manage.py createsuperuser
+python manage.py runserver
 ```
 
----
+By default, the app uses SQLite at `db.sqlite3` and local development settings. Sign in at `http://127.0.0.1:8000/admin/` with the superuser, then create projects, budget lines, and staff accounts. Set each account's role and department in the admin before testing the workflow. The dashboard is at `http://127.0.0.1:8000/`.
 
-## Stage-by-Stage Breakdown
+To configure environment variables, copy `.env.example` to `.env` and export its values in your shell. For PostgreSQL, set `DB_ENGINE=django.db.backends.postgresql` and provide `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT`. Set a unique `DJANGO_SECRET_KEY`, `DJANGO_DEBUG=False`, and production `DJANGO_ALLOWED_HOSTS` before deployment. Do not use the example secret outside local development.
 
-### Phase 1: Initiation & Strategy Alignment
+## Tests and checks
 
-#### 1. Employee / Officer (Initiation)
-* **Primary Role:** Requisitioner
-* **Key Actions:**
-  * Drafts the formal funding request.
-  * Develops detailed **Terms of Reference (TORs)** outlining project scope, deliverables, timeline, and estimated itemized budget.
-* **Output:** Initial requisition packet submitted for departmental review.
+```bash
+python manage.py check
+python manage.py test
+```
 
-#### 2. Supervisor (Departmental Review)
-* **Primary Role:** Departmental Approver
-* **Key Actions:**
-  * Reviews operational necessity and feasibility of the requested activity.
-  * Verifies budget line availability within the departmental allocation.
-  * Ensures resource planning aligns with quarterly department deliverables.
-* **Output:** Departmental endorsement / First-level management approval.
+## Main web routes
 
-#### 3. Monitoring & Evaluation - M&E (Strategic Verification)
-* **Primary Role:** Quality & Impact Assurance
-* **Key Actions:**
-  * Cross-checks TOR activities against the project **Logical Framework (Logframe)**.
-  * Validates planned key performance indicators (KPIs), targets, and expected output metrics.
-  * Ensures compliance with donor guidelines and organizational strategic objectives.
-* **Output:** M&E strategic compliance clearance.
+- `/` — dashboard
+- `/approval-queue/` — actions available to the signed-in user
+- `/requisitions/new/` — create a draft
+- `/requisitions/<id>/` — request details and audit history
+- `/requisitions/<id>/accountability/` — submit liquidation documents
+- `/admin/` — administrative setup
 
-#### 4. Program Director (Executive Authorization)
-* **Primary Role:** Final Operational Approver
-* **Key Actions:**
-  * Evaluates overall strategic impact and project priorities.
-  * Grants final executive sign-off for commit funds.
-* **Output:** Authorized requisition ready for financial processing.
+## REST API
 
----
+- `POST /api/auth/login/` and `POST /api/auth/logout/`
+- `GET, POST /api/requisitions/`
+- `GET, PUT, PATCH /api/requisitions/<id>/`
+- `POST /api/requisitions/<id>/transition/` with `action` and optional `comments`
+- `GET /api/requisition-logs/`
+- `GET, POST /api/accountability/`
+- `GET, POST /api/attachments/`
+- `GET /api/files/<kind>/<id>/` for authenticated protected downloads
+- `GET, POST /api/projects/` and `/api/budget-lines/` (writes restricted to finance/admin)
+- `GET, POST /api/users/` (administrator only)
 
-### Phase 2: Disbursement & Accountability
-
-#### 5. Finance (Pre-Audit & Disbursement)
-* **Primary Role:** Financial Control & Treasury
-* **Key Actions:**
-  * Conducts pre-audit compliance check (verifies General Ledger coding, tax implications, and vendor procurement compliance).
-  * Processes payment or cash advance disbursement.
-  * Records obligation in the accounting ledger.
-* **Output:** Fund disbursement to vendor/requester; transition to open advance status.
-
-#### 6. Awaiting Accountability (Liquidation & Reporting)
-* **Primary Role:** Requester / Finance Control
-* **Key Actions:**
-  * Requester executes the planned activity per approved TORs.
-  * Requester uploads original expenditure proof (receipts, tax invoices, attendance sheets, contracts).
-  * Requester submits a concise Activity/Outcome Report summarizing deliverables achieved.
-* **Output:** Submitted liquidation packet.
-
-#### 7. Completed (Reconciliation & Closeout)
-* **Primary Role:** Finance / Internal Audit
-* **Key Actions:**
-  * Finance reviews and reconciles submitted receipts against disbursed cash advance.
-  * Processes recovery of unspent balances or reimbursement for authorized overruns.
-  * Formally clears the open advance in the ERP/financial system and archives records.
-* **Output:** Fully reconciled and closed requisition file.
----
-
-## ✨ Key Features
-
-* **5-Stage Sequential Approval Chain:** Strict status transitions ensuring requests cannot skip approval levels.
-* **Revision & Clarification Loops:** Approvers can flag requests with `REVISION_REQUESTED` to send them back to the requester for adjustments without destroying the record.
-* **Post-Disbursement Accountability (Liquidation):** Automated transition to `AWAITING_ACCOUNTABILITY` upon payment, requiring upload of final receipts and activity reports before closing.
-* **Role-Based Access Control (RBAC):** Tailored views for `EMPLOYEE`, `SUPERVISOR`, `ME_OFFICER`, `PROGRAM_DIRECTOR`, `FINANCE`, and `ADMIN`.
-* **Delegation of Authority:** Temporary delegate assignment mechanism to bypass bottlenecks when approvers are out of office.
-* **Immutable Audit Trail:** Log entries (`requisition_logs`) capturing actor IDs, timestamps, status shifts, and comments for full compliance and auditing.
-
----
-
-## 🏗️ Core Architecture & Data Model
-
-The backend is built around a deterministic state machine managing the following key entities:
-
-* **`Users`**: Profile management, roles, and delegation settings.
-* **`Projects` & `BudgetLines`**: Financial tracking per grant or organizational department.
-* **`Requisitions`**: Core requisition records containing requested amounts, justification, and state.
-* **`AccountabilitySubmissions`**: Post-disbursement receipts, invoices, and completion reports.
-* **`RequisitionLogs`**: Append-only log table for auditability.
-
----
-
-## 🛠️ Technology Stack
-
-* **Backend:** Python (Django / Flask) or Node.js (Express)
-* **Database:** PostgreSQL / MySQL
-* **Frontend:** Web Dashboard (HTML5 / Tailwind CSS / JS framework)
-* **Authentication:** JWT / Session-based Role Auth
-
----
-
-## 🚀 Quickstart & Setup
-
-### Prerequisites
-* Python 3.10+ / Node.js 18+
-* PostgreSQL or SQLite (for local development)
-
-### Installation Steps
-
-1. **Clone the Repository:**
-   ```bash
-   git clone [https://github.com/CUSTOMIZE-137/financial-help-desk-and-fund-requisition-system.git](https://github.com/CUSTOMIZE-137/financial-help-desk-and-fund-requisition-system.git)
-   cd financial-help-desk-and-fund-requisition-system
+Session-authenticated browser/API requests must include Django's CSRF token for unsafe methods. HTTP Basic authentication is available for API clients and should only be used over TLS outside local development.

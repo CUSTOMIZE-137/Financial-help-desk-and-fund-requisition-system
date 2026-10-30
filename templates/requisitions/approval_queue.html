@@ -1,0 +1,45 @@
+{% extends "requisitions/base.html" %}
+{% block title %}Approval queue · FinanceDesk{% endblock %}
+{% block content %}
+<!-- Each row includes only actions authorized for this user and request. -->
+<div class="page-heading">
+  <div><p class="eyebrow">WORK QUEUE</p><h1>Approval queue</h1><p class="muted">Requests waiting for an action from your role.</p></div>
+</div>
+<section class="panel">
+  {% if requisitions %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Request</th><th>Requester</th><th>Project</th><th>Amount</th><th>Stage</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for item in requisitions %}
+          <tr>
+            <td><a class="table-link" href="{% url 'requisition-detail' item.requisition.pk %}">{{ item.requisition.title }}</a></td>
+            <td>{{ item.requisition.requestor.get_full_name|default:item.requisition.requestor.username }}</td>
+            <td>{{ item.requisition.project.name }}</td>
+            <td>{{ item.requisition.currency }} {{ item.requisition.amount|floatformat:2 }}</td>
+            <td><span class="badge">{{ item.requisition.get_status_display }}</span></td>
+            <td>
+              <div class="queue-actions">
+                {% for action in item.allowed_actions %}
+                  <form method="post" action="{% url 'requisition-action' item.requisition.pk %}">
+                    {% csrf_token %}
+                    <!-- Revision and rejection actions require an audit comment. -->
+                    {% if action == "REQUEST_REVISION" or action == "REJECT" %}
+                      <label class="visually-hidden" for="comment-{{ action }}-{{ item.requisition.pk }}">Comment for {{ action|title }}</label>
+                      <input id="comment-{{ action }}-{{ item.requisition.pk }}" name="comments" type="text" placeholder="Comment required" required>
+                    {% endif %}
+                    <button class="button {% if action == 'REJECT' %}danger{% else %}primary{% endif %}" name="action" value="{{ action }}" type="submit">{% if action == "REQUEST_REVISION" %}Request Revision{% elif action == "FINALIZE_ACCOUNTABILITY" %}Finalize Accountability{% else %}{{ action|title }}{% endif %}</button>
+                  </form>
+                {% endfor %}
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state"><h3>Queue clear</h3><p>There are no requests currently waiting for your approval.</p></div>
+  {% endif %}
+</section>
+{% endblock %}
