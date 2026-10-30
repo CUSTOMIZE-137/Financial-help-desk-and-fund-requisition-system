@@ -4,6 +4,7 @@ The transition table defines valid state changes; role checks separately constra
 who may request each change.
 """
 
+import re
 from typing import Optional
 
 ROLE_PERMISSIONS = {
@@ -77,14 +78,33 @@ VALID_ACTIONS = frozenset(
 
 def normalize_role(value: str) -> str:
     """Normalize spacing, case, and common aliases in a role name."""
-    normalized = "_".join(value.strip().upper().split())
+    if value is None:
+        raise ValueError("Role cannot be empty")
+    cleaned = str(value).strip()
+    if not cleaned:
+        raise ValueError("Role cannot be empty")
+
+    normalized = cleaned.upper()
+    normalized = normalized.replace("&", "_")
+    normalized = normalized.replace("-", "_")
+    normalized = normalized.replace("/", "_")
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+
     aliases = {
+        "ADMIN": "ADMIN",
+        "EMPLOYEE": "EMPLOYEE",
+        "SUPERVISOR": "SUPERVISOR",
         "ME_OFFICER": "ME_OFFICER",
+        "M_E_OFFICER": "ME_OFFICER",
+        "MEOFFICER": "ME_OFFICER",
+        "PROGRAM_DIRECTOR": "PROGRAM_DIRECTOR",
         "PROGRAMDIRECTOR": "PROGRAM_DIRECTOR",
+        "PROGRAM_DIRECTOR_": "PROGRAM_DIRECTOR",
+        "FINANCE": "FINANCE",
+        "FINANCE_OFFICER": "FINANCE",
         "FINANCEOFFICER": "FINANCE",
     }
-    if not normalized:
-        raise ValueError("Role cannot be empty")
     return aliases.get(normalized, normalized)
 
 
@@ -113,13 +133,13 @@ def validate_action_permission(role: str, status: str, action: str) -> bool:
         return False
     if normalized_role == "ADMIN":
         return True
-    if action in ("SUBMIT", "RESUBMIT", "SUBMIT_ACCOUNTABILITY"):
-        return normalized_role == "EMPLOYEE" or (
-            normalized_role == "FINANCE" and action == "SUBMIT_ACCOUNTABILITY"
-        )
-    return ROLE_STAGE_MAP.get(normalized_role) == status or (
-        action == "FINALIZE_ACCOUNTABILITY" and normalized_role == "FINANCE"
-    )
+    if action in ("SUBMIT", "RESUBMIT"):
+        return normalized_role == "EMPLOYEE"
+    if action == "SUBMIT_ACCOUNTABILITY":
+        return normalized_role == "EMPLOYEE" or normalized_role == "FINANCE"
+    if action == "FINALIZE_ACCOUNTABILITY":
+        return normalized_role == "FINANCE" and status == "AWAITING_ACCOUNTABILITY"
+    return ROLE_STAGE_MAP.get(normalized_role) == status
 
 
 def build_audit_payload(
