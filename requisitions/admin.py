@@ -6,9 +6,8 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from requisitions.models import (
     AccountabilitySubmission,
     Attachment,
-    BudgetLine,
-    Project,
     Requisition,
+    RequisitionItem,
     RequisitionLog,
     User,
 )
@@ -36,29 +35,11 @@ class UserAdmin(DjangoUserAdmin):
     list_filter = ("role", "department", "is_active")
 
 
-@admin.register(Project)
-class ProjectAdmin(admin.ModelAdmin):
-    """Provide searchable project setup in the administration site."""
+class RequisitionItemInline(admin.TabularInline):
+    """Display itemized budget breakdown on a requisition."""
 
-    list_display = ("code", "name", "is_active", "start_date", "end_date")
-    list_filter = ("is_active",)
-    search_fields = ("code", "name")
-
-
-@admin.register(BudgetLine)
-class BudgetLineAdmin(admin.ModelAdmin):
-    """Show project allocations and recorded spending for finance staff."""
-
-    list_display = (
-        "code",
-        "category",
-        "project",
-        "allocated_amount",
-        "spent_amount",
-        "currency",
-    )
-    list_filter = ("project", "currency")
-    search_fields = ("code", "category", "project__name")
+    model = RequisitionItem
+    extra = 1
 
 
 class RequisitionLogInline(admin.TabularInline):
@@ -80,17 +61,27 @@ class RequisitionAdmin(admin.ModelAdmin):
 
     list_display = (
         "title",
+        "activity_type",
         "requestor",
-        "project",
         "amount",
         "currency",
+        "voucher_number",
+        "disbursement_method",
         "status",
         "requested_at",
     )
-    list_filter = ("status", "project", "department")
-    search_fields = ("title", "requestor__username", "project__name")
-    readonly_fields = ("status", "requested_at", "updated_at", "approved_at", "disbursed_at")
-    inlines = [RequisitionLogInline]
+    list_filter = ("status", "activity_type", "department")
+    search_fields = ("title", "requestor__username", "team_lead", "program")
+    readonly_fields = (
+        "status",
+        "requested_at",
+        "updated_at",
+        "approved_at",
+        "disbursed_at",
+        "voucher_number",
+        "disbursement_method",
+    )
+    inlines = [RequisitionItemInline, RequisitionLogInline]
 
     def get_readonly_fields(self, request, obj=None):
         """Freeze all request fields once approval or processing has started."""
@@ -114,8 +105,9 @@ class AccountabilitySubmissionAdmin(admin.ModelAdmin):
         "requisition",
         "submitted_by",
         "actual_amount_spent",
+            "unspent_amount",
         "submitted_at",
-        "finance_approved_at",
+        "audit_approved_at",
     )
     readonly_fields = [field.name for field in AccountabilitySubmission._meta.fields]
 

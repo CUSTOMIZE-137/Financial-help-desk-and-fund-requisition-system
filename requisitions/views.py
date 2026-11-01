@@ -1,5 +1,7 @@
 """HTML views and authenticated REST endpoints for requisitions."""
 
+from decimal import Decimal
+
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
@@ -20,18 +22,15 @@ from requisitions.forms import AccountabilityForm, RequisitionForm
 from requisitions.models import (
     AccountabilitySubmission,
     Attachment,
-    BudgetLine,
-    Project,
     Requisition,
+    RequisitionItem,
     RequisitionLog,
     User,
 )
 from requisitions.serializers import (
     AccountabilitySubmissionSerializer,
     AttachmentSerializer,
-    BudgetLineSerializer,
     LoginSerializer,
-    ProjectSerializer,
     RequisitionActionSerializer,
     RequisitionLogSerializer,
     RequisitionSerializer,
@@ -47,7 +46,7 @@ from requisitions.workflow import (
 
 def _dashboard_context(user):
     """Build role-scoped dashboard totals and the latest visible requests."""
-    requisitions = filter_queryset_by_role(user, Requisition.objects.select_related("project"))
+    requisitions = filter_queryset_by_role(user, Requisition.objects.all())
     return {
         "requisitions": requisitions[:10],
         "counts": {
@@ -82,9 +81,7 @@ def approval_queue_view(request):
     """Show requests on which the signed-in user can currently act."""
     if not can_access_approval_queue(request.user):
         raise PermissionDenied
-    candidates = filter_queryset_by_role(
-        request.user, Requisition.objects.select_related("project", "requestor")
-    )
+    candidates = filter_queryset_by_role(request.user, Requisition.objects.select_related("requestor"))
     action_names = (
         "APPROVE",
         "REQUEST_REVISION",
@@ -99,7 +96,10 @@ def approval_queue_view(request):
             if can_execute_action(request.user, item, action)
         ]
         if allowed_actions:
-            queue.append({"requisition": item, "allowed_actions": allowed_actions})
+            queue.append({
+                "requisition": item,
+                "allowed_actions": allowed_actions,
+            })
     return render(request, "requisitions/approval_queue.html", {"requisitions": queue})
 
 
@@ -133,12 +133,66 @@ def logout_view(request):
     return redirect("login")
 
 
+def _save_requisition_items(requisition, post_data):
+    """Save validated budget rows and recalculate the request total server-side."""
+    descriptions = post_data.getlist("item_description[]")
+    quantities = post_data.getlist("quantity[]")
+    unit_costs = post_data.getlist("unit_cost[]")
+    requisition.items.all().delete()
+    total_sum = Decimal("0.00")
+    for desc, qty, unit_cost in zip(descriptions, quantities, unit_costs):
+        desc = desc.strip()
+        if not desc:
+            continue
+        qty_dec = Decimal(qty.strip())
+        unit_cost_dec = Decimal(unit_cost.strip())
+        total_dec = (qty_dec * unit_cost_dec).quantize(Decimal("0.01"))
+        RequisitionItem.objects.create(
+            requisition=requisition,
+            item_description=desc,
+            quantity=qty_dec,
+            unit_cost=unit_cost_dec,
+            total_cost=total_dec,
+        )
+        total_sum += total_dec
+    requisition.amount = total_sum
+    requisition.save(update_fields=["amount"])
+
+
+def _budget_rows_for_form(request, requisition=None):
+    """Build budget-table rows from submitted data or an existing request."""
+    if request.method == "POST":
+        descriptions = request.POST.getlist("item_description[]")
+        quantities = request.POST.getlist("quantity[]")
+        unit_costs = request.POST.getlist("unit_cost[]")
+        total_costs = request.POST.getlist("total_cost[]")
+        row_count = max(len(descriptions), len(quantities), len(unit_costs), 1)
+        return [
+            {
+                "description": descriptions[index] if index < len(descriptions) else "",
+                "quantity": quantities[index] if index < len(quantities) else "",
+                "unit_cost": unit_costs[index] if index < len(unit_costs) else "",
+                "total_cost": total_costs[index] if index < len(total_costs) else "",
+            }
+            for index in range(row_count)
+        ]
+    if requisition:
+        return [
+            {
+                "description": item.item_description,
+                "quantity": item.quantity,
+                "unit_cost": item.unit_cost,
+                "total_cost": item.total_cost,
+            }
+            for item in requisition.items.all()
+        ] or [{"description": "", "quantity": "1", "unit_cost": "", "total_cost": ""}]
+    return [{"description": "", "quantity": "1", "unit_cost": "", "total_cost": ""}]
+
+
 @login_required
 def requisition_create_view(request):
-    """Create a draft request owned by the signed-in employee."""
-    if request.user.role != User.ROLE_EMPLOYEE and not (
-        request.user.is_superuser or request.user.role == User.ROLE_ADMIN
-    ):
+    """Create a request owned by the signed-in employee."""
+    if request.user.role != User.ROLE_EMPLOYEE:
         raise PermissionDenied
     form = RequisitionForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
@@ -146,12 +200,26 @@ def requisition_create_view(request):
         requisition.requestor = request.user
         requisition.department = request.user.department
         requisition.save()
-        messages.success(request, "Draft requisition created.")
+        _save_requisition_items(requisition, request.POST)
+
+        action_type = request.POST.get("action_type")
+        if action_type == "submit":
+            try:
+                transition_requisition(requisition.pk, request.user, "SUBMIT")
+                messages.success(request, "Requisition submitted successfully.")
+            except Exception as exc:
+                messages.warning(request, f"Requisition saved as draft: {exc}")
+        else:
+            messages.success(request, "Draft requisition created.")
         return redirect("requisition-detail", pk=requisition.pk)
     return render(
         request,
         "requisitions/requisition_form.html",
-        {"form": form, "is_edit": False},
+        {
+            "form": form,
+            "is_edit": False,
+            "budget_rows": _budget_rows_for_form(request),
+        },
     )
 
 
@@ -172,13 +240,29 @@ def requisition_edit_view(request, pk):
         raise PermissionDenied
     form = RequisitionForm(request.POST or None, instance=requisition)
     if request.method == "POST" and form.is_valid():
-        form.save()
-        messages.success(request, "Requisition updated.")
+        requisition = form.save()
+        _save_requisition_items(requisition, request.POST)
+
+        action_type = request.POST.get("action_type")
+        if action_type == "submit":
+            action = "RESUBMIT" if requisition.status == Requisition.STATUS_REVISION_REQUESTED else "SUBMIT"
+            try:
+                transition_requisition(requisition.pk, request.user, action)
+                messages.success(request, "Requisition submitted successfully.")
+            except Exception as exc:
+                messages.warning(request, f"Requisition updated, but submit failed: {exc}")
+        else:
+            messages.success(request, "Requisition updated.")
         return redirect("requisition-detail", pk=requisition.pk)
     return render(
         request,
         "requisitions/requisition_form.html",
-        {"form": form, "is_edit": True, "requisition": requisition},
+        {
+            "form": form,
+            "is_edit": True,
+            "requisition": requisition,
+            "budget_rows": _budget_rows_for_form(request, requisition),
+        },
     )
 
 
@@ -186,10 +270,7 @@ def requisition_edit_view(request, pk):
 def requisition_detail_view(request, pk):
     """Render an authorized request with its history and available actions."""
     requisition = get_object_or_404(
-        filter_queryset_by_role(
-            request.user,
-            Requisition.objects.select_related("project", "budget_line", "requestor"),
-        ),
+        filter_queryset_by_role(request.user, Requisition.objects.select_related("requestor")),
         pk=pk,
     )
     actions = (
@@ -209,6 +290,7 @@ def requisition_detail_view(request, pk):
         "requisitions/requisition_detail.html",
         {
             "requisition": requisition,
+            "items": requisition.items.all(),
             "logs": requisition.logs.select_related("actor"),
             "accountability": requisition.accountability_submissions.first(),
             "allowed_actions": allowed_actions,
@@ -233,7 +315,14 @@ def requisition_action_view(request, pk):
     action = request.POST.get("action", "")
     comments = request.POST.get("comments", "")
     try:
-        transition_requisition(requisition.pk, request.user, action, comments)
+        transition_requisition(
+            requisition.pk,
+            request.user,
+            action,
+            comments,
+            request.POST.get("disbursement_method", ""),
+            request.POST.get("budget_line", ""),
+        )
     except (PermissionDenied, ValidationError) as exc:
         if isinstance(exc, ValidationError):
             errors = exc.messages
@@ -282,7 +371,7 @@ def accountability_create_view(request, pk):
             for error in exc.messages:
                 messages.error(request, error)
         else:
-            messages.success(request, "Accountability submitted for finance review.")
+            messages.success(request, "Accountability submitted for Internal Audit review.")
             return redirect("requisition-detail", pk=pk)
     return render(
         request,
@@ -329,23 +418,6 @@ def _protected_file_response(user, kind, pk):
     return response
 
 
-class IsAdminOrReadOnly(permissions.BasePermission):
-    """Allow authenticated reads and reserve project/budget writes for finance."""
-
-    def has_permission(self, request, view):
-        """Check the user's role before the API view handles the request."""
-        if request.method in permissions.SAFE_METHODS:
-            return request.user and request.user.is_authenticated
-        return bool(
-            request.user
-            and request.user.is_authenticated
-            and (
-                request.user.is_superuser
-                or request.user.role in (User.ROLE_ADMIN, User.ROLE_FINANCE)
-            )
-        )
-
-
 class IsSystemAdmin(permissions.BasePermission):
     """Restrict user-account administration to system administrators."""
 
@@ -366,22 +438,6 @@ class UserListCreateView(generics.ListCreateAPIView):
     queryset = User.objects.all()
 
 
-class ProjectListCreateView(generics.ListCreateAPIView):
-    """List active project data or let finance/admin staff manage projects."""
-
-    serializer_class = ProjectSerializer
-    permission_classes = [IsAdminOrReadOnly]
-    queryset = Project.objects.all()
-
-
-class BudgetLineListCreateView(generics.ListCreateAPIView):
-    """List budget allocations or allow finance/admin staff to maintain them."""
-
-    serializer_class = BudgetLineSerializer
-    permission_classes = [IsAdminOrReadOnly]
-    queryset = BudgetLine.objects.select_related("project")
-
-
 class RequisitionListCreateView(generics.ListCreateAPIView):
     """List requests visible to the user and create employee-owned drafts."""
 
@@ -389,18 +445,13 @@ class RequisitionListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         """Apply role-based visibility and preload related display fields."""
-        return filter_queryset_by_role(
-            self.request.user,
-            Requisition.objects.select_related("requestor", "project", "budget_line"),
-        )
+        return filter_queryset_by_role(self.request.user, Requisition.objects.select_related("requestor"))
 
     def perform_create(self, serializer):
         """Enforce creator roles and set ownership and department server-side."""
         user = self.request.user
-        if user.role != User.ROLE_EMPLOYEE and not (
-            user.is_superuser or user.role == User.ROLE_ADMIN
-        ):
-            raise DRFPermissionDenied("Only employees and administrators can create requisitions.")
+        if user.role != User.ROLE_EMPLOYEE:
+            raise DRFPermissionDenied("Only employees can create requisitions.")
         serializer.save(
             requestor=user,
             department=user.department,
@@ -458,6 +509,8 @@ class RequisitionActionView(APIView):
                 request.user,
                 serializer.validated_data["action"],
                 serializer.validated_data.get("comments", ""),
+                serializer.validated_data.get("disbursement_method", ""),
+                serializer.validated_data.get("budget_line", ""),
             )
         except PermissionDenied as exc:
             raise DRFPermissionDenied(str(exc)) from exc

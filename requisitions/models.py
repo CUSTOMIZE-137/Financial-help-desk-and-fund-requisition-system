@@ -20,6 +20,7 @@ class User(AbstractUser):
     ROLE_ME_OFFICER = "ME_OFFICER"
     ROLE_PROGRAM_DIRECTOR = "PROGRAM_DIRECTOR"
     ROLE_FINANCE = "FINANCE"
+    ROLE_INTERNAL_AUDIT = "INTERNAL_AUDIT"
     ROLE_ADMIN = "ADMIN"
     ROLE_CHOICES = [
         (ROLE_EMPLOYEE, "Employee"),
@@ -27,6 +28,7 @@ class User(AbstractUser):
         (ROLE_ME_OFFICER, "M&E Officer"),
         (ROLE_PROGRAM_DIRECTOR, "Program Director"),
         (ROLE_FINANCE, "Finance"),
+        (ROLE_INTERNAL_AUDIT, "Internal Audit"),
         (ROLE_ADMIN, "Admin"),
     ]
 
@@ -77,73 +79,6 @@ class User(AbstractUser):
         return f"{self.get_full_name() or self.username} ({self.get_role_display()})"
 
 
-class Project(models.Model):
-    """A funded project that groups budget lines and requisitions."""
-
-    code = models.CharField(max_length=80, unique=True)
-    name = models.CharField(max_length=200)
-    description = models.TextField(blank=True)
-    start_date = models.DateField(null=True, blank=True)
-    end_date = models.DateField(null=True, blank=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(default=timezone.now)
-
-    def clean(self):
-        """Require a project end date to follow its optional start date."""
-        super().clean()
-        if self.start_date and self.end_date and self.start_date > self.end_date:
-            raise ValidationError({"end_date": "The end date must not precede the start date."})
-
-    def __str__(self):
-        """Return the project's human-readable identifier."""
-        return f"{self.code} - {self.name}"
-
-
-class BudgetLine(models.Model):
-    """A project allocation and the amount already committed or spent."""
-
-    project = models.ForeignKey(
-        Project, on_delete=models.CASCADE, related_name="budget_lines"
-    )
-    code = models.CharField(max_length=80)
-    category = models.CharField(max_length=120)
-    allocated_amount = models.DecimalField(
-        max_digits=14, decimal_places=2, validators=[MinValueValidator(0)]
-    )
-    spent_amount = models.DecimalField(
-        max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(0)]
-    )
-    currency = models.CharField(max_length=3, default="USD")
-    created_at = models.DateTimeField(default=timezone.now)
-
-    class Meta:
-        """Keep budget lines unique within a project and amounts nonnegative."""
-
-        ordering = ["project__code", "code"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["project", "code"], name="unique_budget_line_per_project"
-            ),
-            models.CheckConstraint(
-                check=models.Q(allocated_amount__gte=0),
-                name="budget_allocated_nonnegative",
-            ),
-            models.CheckConstraint(
-                check=models.Q(spent_amount__gte=0),
-                name="budget_spent_nonnegative",
-            ),
-        ]
-
-    @property
-    def available_amount(self):
-        """Compute the remaining allocation without storing duplicate state."""
-        return self.allocated_amount - self.spent_amount
-
-    def __str__(self):
-        """Return a project-scoped budget-line identifier."""
-        return f"{self.project.code}:{self.code}"
-
-
 class Requisition(models.Model):
     """A fund request whose status advances through the approval workflow."""
 
@@ -165,10 +100,23 @@ class Requisition(models.Model):
         (STATUS_PENDING_DIRECTOR, "Pending Director"),
         (STATUS_PENDING_FINANCE, "Pending Finance"),
         (STATUS_DISBURSED, "Disbursed"),
-        (STATUS_AWAITING_ACCOUNTABILITY, "Awaiting Accountability"),
+        (STATUS_AWAITING_ACCOUNTABILITY, "Awaiting Internal Audit"),
         (STATUS_COMPLETED, "Completed"),
         (STATUS_REJECTED, "Rejected"),
         (STATUS_REVISION_REQUESTED, "Revision Requested"),
+    ]
+
+    ACTIVITY_NON_ADMINISTRATIVE = "NON_ADMINISTRATIVE"
+    ACTIVITY_ADMINISTRATIVE = "ADMINISTRATIVE"
+    ACTIVITY_CHOICES = [
+        (ACTIVITY_NON_ADMINISTRATIVE, "Non-administrative Activity"),
+        (ACTIVITY_ADMINISTRATIVE, "Administrative Activity"),
+    ]
+    DISBURSEMENT_BANK_TRANSFER = "BANK_TRANSFER"
+    DISBURSEMENT_PETTY_CASH = "PETTY_CASH"
+    DISBURSEMENT_METHOD_CHOICES = [
+        (DISBURSEMENT_BANK_TRANSFER, "Bank transfer"),
+        (DISBURSEMENT_PETTY_CASH, "Petty cash"),
     ]
 
     requestor = models.ForeignKey(
@@ -176,18 +124,19 @@ class Requisition(models.Model):
         on_delete=models.PROTECT,
         related_name="requisitions",
     )
-    project = models.ForeignKey(
-        Project, on_delete=models.PROTECT, related_name="requisitions"
+    activity_type = models.CharField(
+        max_length=32,
+        choices=ACTIVITY_CHOICES,
+        default=ACTIVITY_NON_ADMINISTRATIVE,
+        verbose_name="Activity",
     )
-    budget_line = models.ForeignKey(
-        BudgetLine, on_delete=models.PROTECT, related_name="requisitions"
-    )
-    title = models.CharField(max_length=200)
-    description = models.TextField()
+    title = models.CharField(max_length=200, verbose_name="Activity Title")
+    description = models.TextField(blank=True, verbose_name="Description / Purpose")
     amount = models.DecimalField(
-        max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))]
+        max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))],
+        verbose_name="Budget Amount"
     )
-    currency = models.CharField(max_length=3, default="USD")
+    currency = models.CharField(max_length=3, default="UGX")
     status = models.CharField(
         max_length=32, choices=STATUS_CHOICES, default=STATUS_DRAFT, db_index=True
     )
@@ -196,9 +145,47 @@ class Requisition(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     approved_at = models.DateTimeField(null=True, blank=True)
     disbursed_at = models.DateTimeField(null=True, blank=True)
+    voucher_number = models.CharField(max_length=40, blank=True)
+    disbursement_method = models.CharField(
+        max_length=32, choices=DISBURSEMENT_METHOD_CHOICES, blank=True
+    )
     due_date = models.DateField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True)
     last_comment = models.TextField(blank=True)
+
+    # Mukisa Foundation Activity Plan template fields (for Non-administrative Activities)
+    activity_date = models.DateField(null=True, blank=True, verbose_name="Date of the Activity")
+    team_lead = models.CharField(max_length=200, blank=True, verbose_name="Team lead")
+    impact = models.TextField(blank=True, verbose_name="Impact")
+    program = models.CharField(max_length=200, blank=True, verbose_name="Program")
+    indicator = models.TextField(blank=True, verbose_name="Indicator")
+    activity_overview = models.TextField(blank=True, verbose_name="Overview of the Activity")
+    expected_outcomes = models.TextField(blank=True, verbose_name="Expected outcomes")
+    expected_outputs = models.TextField(blank=True, verbose_name="Expected outputs")
+    target_number = models.CharField(max_length=120, blank=True, verbose_name="Target Number")
+    inputs = models.TextField(blank=True, verbose_name="Inputs")
+    other_staff = models.TextField(
+        blank=True, verbose_name="Other staff who will be involved in your activity"
+    )
+    risk_assessment = models.TextField(
+        blank=True,
+        verbose_name="Risk assessment plan and mitigation for the planned activity",
+    )
+    reporting_strategy = models.TextField(blank=True, verbose_name="Reporting strategy")
+
+    @property
+    def activity(self):
+        """Alias property matching user terminology."""
+        return self.activity_type
+
+    @activity.setter
+    def activity(self, value):
+        self.activity_type = value
+
+    @property
+    def is_administrative(self):
+        """Return whether this request is an administrative activity."""
+        return self.activity_type == self.ACTIVITY_ADMINISTRATIVE
 
     class Meta:
         """Order requests by recency and declare workflow-specific permissions."""
@@ -210,23 +197,50 @@ class Requisition(models.Model):
         ]
 
     def clean(self):
-        """Validate project/budget consistency, currency, and request dates."""
+        """Validate dates, currency, and program-activity requirements."""
         super().clean()
-        if self.budget_line_id and self.project_id:
-            if self.budget_line.project_id != self.project_id:
-                raise ValidationError(
-                    {"budget_line": "Choose a budget line from the selected project."}
-                )
-            if self.budget_line.currency != self.currency:
-                raise ValidationError(
-                    {"currency": "Currency must match the selected budget line."}
-                )
         if self.due_date and self.due_date < date.today():
             raise ValidationError({"due_date": "The due date cannot be in the past."})
+        if self.activity_type == self.ACTIVITY_NON_ADMINISTRATIVE and not self.indicator:
+            raise ValidationError(
+                {"indicator": "An indicator is required for program activities."}
+            )
+        if self.activity_type == self.ACTIVITY_NON_ADMINISTRATIVE and not self.description:
+            if self.activity_overview:
+                self.description = self.activity_overview
 
     def __str__(self):
         """Include the current state when displaying the request."""
         return f"{self.title} ({self.get_status_display()})"
+
+
+class RequisitionItem(models.Model):
+    """An itemized line item within a requisition budget."""
+
+    requisition = models.ForeignKey(
+        Requisition, on_delete=models.CASCADE, related_name="items"
+    )
+    item_description = models.CharField(max_length=255, verbose_name="Item")
+    quantity = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal("1.00"), verbose_name="Quantity"
+    )
+    unit_cost = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal("0.00"), verbose_name="Unit Cost"
+    )
+    total_cost = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal("0.00"), verbose_name="Total Cost"
+    )
+
+    class Meta:
+        ordering = ["id"]
+
+    def save(self, *args, **kwargs):
+        if not self.total_cost:
+            self.total_cost = (self.quantity or Decimal("0")) * (self.unit_cost or Decimal("0"))
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.item_description} ({self.total_cost})"
 
 
 class RequisitionLog(models.Model):
@@ -246,7 +260,7 @@ class RequisitionLog(models.Model):
         (ACTION_REJECT, "Reject"),
         (ACTION_RESUBMIT, "Resubmit"),
         (ACTION_SUBMIT_ACCOUNTABILITY, "Submit Accountability"),
-        (ACTION_FINALIZE_ACCOUNTABILITY, "Finalize Accountability"),
+        (ACTION_FINALIZE_ACCOUNTABILITY, "Validate and Close"),
     ]
 
     requisition = models.ForeignKey(
@@ -310,11 +324,17 @@ class AccountabilitySubmission(models.Model):
     )
     submitted_at = models.DateTimeField(default=timezone.now)
     finance_approved_at = models.DateTimeField(null=True, blank=True)
+    audit_approved_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         """Show the most recently submitted accountability report first."""
 
         ordering = ["-submitted_at"]
+
+    @property
+    def unspent_amount(self):
+        """Return the unspent portion of the approved amount for reconciliation."""
+        return self.requisition.amount - self.actual_amount_spent
 
     def clean(self):
         """Ensure actual spend and uploaded evidence meet request limits."""
@@ -322,6 +342,12 @@ class AccountabilitySubmission(models.Model):
         if self.requisition_id and self.actual_amount_spent > self.requisition.amount:
             raise ValidationError(
                 {"actual_amount_spent": "Actual spending cannot exceed the approved amount."}
+            )
+        if self.actual_amount_spent and not any(
+            (self.receipt_file, self.invoice_file, self.receipt_reference, self.invoice_reference)
+        ):
+            raise ValidationError(
+                "Provide at least one receipt or invoice file or reference for reported spending."
             )
         for field_name in ("receipt_file", "invoice_file"):
             uploaded_file = getattr(self, field_name)

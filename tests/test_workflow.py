@@ -51,11 +51,27 @@ class WorkflowRulesTests(SimpleTestCase):
         self.assertTrue(
             validate_action_permission("FINANCE", "PENDING_FINANCE", "APPROVE")
         )
+        self.assertTrue(
+            validate_action_permission(
+                "INTERNAL_AUDIT", "AWAITING_ACCOUNTABILITY", "FINALIZE_ACCOUNTABILITY"
+            )
+        )
+        self.assertFalse(
+            validate_action_permission(
+                "FINANCE", "AWAITING_ACCOUNTABILITY", "FINALIZE_ACCOUNTABILITY"
+            )
+        )
         self.assertFalse(
             validate_action_permission("EMPLOYEE", "PENDING_FINANCE", "APPROVE")
         )
         self.assertFalse(
             validate_action_permission("FINANCE", "PENDING_SUPERVISOR", "APPROVE")
+        )
+        self.assertFalse(
+            validate_action_permission("ADMIN", "PENDING_SUPERVISOR", "APPROVE")
+        )
+        self.assertFalse(
+            validate_action_permission("ADMIN", "PENDING_FINANCE", "APPROVE")
         )
 
     def test_build_audit_payload_strips_comments(self):

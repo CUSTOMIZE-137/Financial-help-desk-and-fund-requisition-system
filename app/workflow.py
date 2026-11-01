@@ -16,18 +16,8 @@ ROLE_PERMISSIONS = {
         "APPROVE",
         "REQUEST_REVISION",
         "REJECT",
-        "SUBMIT_ACCOUNTABILITY",
-        "FINALIZE_ACCOUNTABILITY",
     ),
-    "ADMIN": (
-        "SUBMIT",
-        "APPROVE",
-        "REQUEST_REVISION",
-        "REJECT",
-        "RESUBMIT",
-        "SUBMIT_ACCOUNTABILITY",
-        "FINALIZE_ACCOUNTABILITY",
-    ),
+    "INTERNAL_AUDIT": ("FINALIZE_ACCOUNTABILITY",),
 }
 
 REVIEW_START_STATUS = "PENDING_SUPERVISOR"
@@ -67,6 +57,7 @@ ROLE_STAGE_MAP = {
     "ME_OFFICER": "PENDING_ME",
     "PROGRAM_DIRECTOR": "PENDING_DIRECTOR",
     "FINANCE": "PENDING_FINANCE",
+    "INTERNAL_AUDIT": "AWAITING_ACCOUNTABILITY",
 }
 
 # Derive these sets from the workflow definition to keep validation in sync.
@@ -104,6 +95,9 @@ def normalize_role(value: str) -> str:
         "FINANCE": "FINANCE",
         "FINANCE_OFFICER": "FINANCE",
         "FINANCEOFFICER": "FINANCE",
+        "INTERNAL_AUDIT": "INTERNAL_AUDIT",
+        "INTERNAL_AUDITOR": "INTERNAL_AUDIT",
+        "INTERNALAUDIT": "INTERNAL_AUDIT",
     }
     return aliases.get(normalized, normalized)
 
@@ -113,10 +107,18 @@ def can_transition(status: str, action: str) -> bool:
     return status in VALID_STATUSES and action in STATUS_FLOW.get(status, {})
 
 
-def next_status_for_action(status: str, action: str) -> Optional[str]:
-    """Return the destination state, or ``None`` if the transition is invalid."""
+def next_status_for_action(
+    status: str, action: str, is_administrative: bool = False
+) -> Optional[str]:
+    """Return the destination state, or ``None`` if the transition is invalid.
+
+    Administrative activities bypass intermediate approval stages (Supervisor, M&E,
+    and Director) and transition directly to Finance review.
+    """
     if not can_transition(status, action):
         return None
+    if is_administrative and action in ("SUBMIT", "RESUBMIT"):
+        return "PENDING_FINANCE"
     return STATUS_FLOW[status][action]
 
 
@@ -131,14 +133,10 @@ def validate_action_permission(role: str, status: str, action: str) -> bool:
         return False
     if not can_transition(status, action):
         return False
-    if normalized_role == "ADMIN":
-        return True
     if action in ("SUBMIT", "RESUBMIT"):
         return normalized_role == "EMPLOYEE"
-    if action == "SUBMIT_ACCOUNTABILITY":
-        return normalized_role == "EMPLOYEE" or normalized_role == "FINANCE"
     if action == "FINALIZE_ACCOUNTABILITY":
-        return normalized_role == "FINANCE" and status == "AWAITING_ACCOUNTABILITY"
+        return normalized_role == "INTERNAL_AUDIT" and status == "AWAITING_ACCOUNTABILITY"
     return ROLE_STAGE_MAP.get(normalized_role) == status
 
 

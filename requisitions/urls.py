@@ -13,16 +13,7 @@ urlpatterns = [
         name="api-protected-file",
     ),
     path("users/", views.UserListCreateView.as_view(), name="user-list-create"),
-    path(
-        "projects/",
-        views.ProjectListCreateView.as_view(),
-        name="project-list-create",
-    ),
-    path(
-        "budget-lines/",
-        views.BudgetLineListCreateView.as_view(),
-        name="budget-line-list-create",
-    ),
+
     path(
         "requisitions/",
         views.RequisitionListCreateView.as_view(),

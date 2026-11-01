@@ -36,27 +36,11 @@ def can_execute_action(user, requisition, action):
     """Check user, role, department, and delegation rules for an action."""
     if not user.is_authenticated or not can_transition(requisition.status, action):
         return False
-    if action == "RESUBMIT":
-        return requisition.requestor_id == user.pk
-    if user.role == User.ROLE_EMPLOYEE:
-        if action in ("SUBMIT", "SUBMIT_ACCOUNTABILITY"):
-            return requisition.requestor_id == user.pk
-        if action not in (
-            "APPROVE",
-            "REQUEST_REVISION",
-            "REJECT",
-            "FINALIZE_ACCOUNTABILITY",
-        ):
-            return False
-    elif user.is_superuser or user.role == User.ROLE_ADMIN:
-        return True
-
     if action in ("SUBMIT", "RESUBMIT", "SUBMIT_ACCOUNTABILITY"):
-        if requisition.requestor_id == user.pk:
-            return True
-        if action == "SUBMIT_ACCOUNTABILITY" and user.role == User.ROLE_FINANCE:
-            return True
-        return False
+        return (
+            user.role == User.ROLE_EMPLOYEE
+            and requisition.requestor_id == user.pk
+        )
 
     required_status = ROLE_STAGE_MAP.get(user.role)
     if required_status == requisition.status:
@@ -65,11 +49,7 @@ def can_execute_action(user, requisition, action):
         return True
 
     for role, department in active_delegate_roles(user):
-        if ROLE_STAGE_MAP.get(role) != requisition.status and not (
-            action == "FINALIZE_ACCOUNTABILITY"
-            and role == User.ROLE_FINANCE
-            and requisition.status == Requisition.STATUS_AWAITING_ACCOUNTABILITY
-        ):
+        if ROLE_STAGE_MAP.get(role) != requisition.status:
             continue
         if role == User.ROLE_SUPERVISOR and (
             not department or department != requisition.department
@@ -77,7 +57,7 @@ def can_execute_action(user, requisition, action):
             continue
         return True
 
-    return action == "FINALIZE_ACCOUNTABILITY" and user.role == User.ROLE_FINANCE
+    return False
 
 
 def filter_queryset_by_role(user, queryset):
@@ -89,7 +69,8 @@ def filter_queryset_by_role(user, queryset):
 
     visible = Q(requestor=user)
     if user.role == User.ROLE_SUPERVISOR and user.department:
-        visible |= Q(department=user.department)
+        # Administrative activities bypass the supervisor and go directly to finance.
+        visible |= Q(department=user.department, activity_type=Requisition.ACTIVITY_NON_ADMINISTRATIVE)
     if user.role == User.ROLE_ME_OFFICER:
         visible |= Q(status=Requisition.STATUS_PENDING_ME)
     elif user.role == User.ROLE_PROGRAM_DIRECTOR:
@@ -99,15 +80,14 @@ def filter_queryset_by_role(user, queryset):
             status__in=[
                 Requisition.STATUS_PENDING_FINANCE,
                 Requisition.STATUS_DISBURSED,
-                Requisition.STATUS_AWAITING_ACCOUNTABILITY,
             ]
         )
+    elif user.role == User.ROLE_INTERNAL_AUDIT:
+        visible |= Q(status=Requisition.STATUS_AWAITING_ACCOUNTABILITY)
     for role, department in active_delegate_roles(user):
         stage = ROLE_STAGE_MAP.get(role)
         if stage:
             condition = Q(status=stage)
-            if role == User.ROLE_FINANCE:
-                condition |= Q(status=Requisition.STATUS_AWAITING_ACCOUNTABILITY)
             if role == User.ROLE_SUPERVISOR:
                 if department:
                     condition &= Q(department=department)
@@ -117,11 +97,18 @@ def filter_queryset_by_role(user, queryset):
     return queryset.filter(visible).distinct()
 
 
-def transition_requisition(requisition_id, actor, action, comments=""):
+def transition_requisition(
+    requisition_id,
+    actor,
+    action,
+    comments="",
+    disbursement_method="",
+    budget_line_id="",
+):
     """Apply one authorized state transition and persist its audit record.
 
-    The transaction keeps the request, budget allocation, accountability, and
-    log entry consistent if any validation or database write fails.
+    The transaction keeps the request, accountability, and audit history
+    consistent if any validation or database write fails.
     """
     from django.core.exceptions import PermissionDenied, ValidationError
     from django.db import transaction
@@ -131,7 +118,7 @@ def transition_requisition(requisition_id, actor, action, comments=""):
         # Lock the request so concurrent approvals cannot both advance its state.
         requisition = (
             Requisition.objects.select_for_update()
-            .select_related("requestor", "budget_line", "project")
+            .select_related("requestor")
             .get(pk=requisition_id)
         )
         if not can_execute_action(actor, requisition, action):
@@ -141,24 +128,28 @@ def transition_requisition(requisition_id, actor, action, comments=""):
                 raise ValidationError("A comment is required for this action.")
 
         previous_status = requisition.status
-        new_status = next_status_for_action(previous_status, action)
+        is_admin_activity = (requisition.activity_type == Requisition.ACTIVITY_ADMINISTRATIVE)
+        new_status = next_status_for_action(
+            previous_status, action, is_administrative=is_admin_activity
+        )
         if new_status is None:
             raise ValidationError("This action is not valid for the current status.")
 
+        # Budget-line selection was removed from the model layer; keep the old
+        # parameter only for backwards compatibility with older callers.
+        _ = budget_line_id
+
         if action == "SUBMIT":
             requisition.full_clean()
-            if requisition.amount > requisition.budget_line.available_amount:
-                raise ValidationError("The selected budget line has insufficient funds.")
         if action == "APPROVE" and previous_status == Requisition.STATUS_PENDING_FINANCE:
-            # Lock and recheck the allocation at the point funds are committed.
-            budget_line = type(requisition.budget_line).objects.select_for_update().get(
-                pk=requisition.budget_line_id
-            )
-            if requisition.amount > budget_line.available_amount:
-                raise ValidationError("The selected budget line no longer has sufficient funds.")
-            budget_line.spent_amount += requisition.amount
-            budget_line.save(update_fields=["spent_amount"])
+            valid_methods = dict(Requisition.DISBURSEMENT_METHOD_CHOICES)
+            if disbursement_method not in valid_methods:
+                raise ValidationError("Select a valid disbursement method before disbursing funds.")
+            requisition.disbursement_method = disbursement_method
+            requisition.voucher_number = f"FV-{timezone.localdate():%Y}-{requisition.pk:06d}"
             requisition.disbursed_at = timezone.now()
+            if not requisition.approved_at:
+                requisition.approved_at = timezone.now()
         if action == "APPROVE" and previous_status == Requisition.STATUS_PENDING_DIRECTOR:
             requisition.approved_at = timezone.now()
         if (
@@ -172,13 +163,8 @@ def transition_requisition(requisition_id, actor, action, comments=""):
             submission = requisition.accountability_submissions.first()
             if submission is None:
                 raise ValidationError("No accountability submission exists for this requisition.")
-            submission.finance_approved_at = timezone.now()
-            submission.save(update_fields=["finance_approved_at"])
-            budget_line = type(requisition.budget_line).objects.select_for_update().get(
-                pk=requisition.budget_line_id
-            )
-            budget_line.spent_amount -= requisition.amount - submission.actual_amount_spent
-            budget_line.save(update_fields=["spent_amount"])
+            submission.audit_approved_at = timezone.now()
+            submission.save(update_fields=["audit_approved_at"])
 
         requisition.status = new_status
         requisition.last_comment = comments.strip()

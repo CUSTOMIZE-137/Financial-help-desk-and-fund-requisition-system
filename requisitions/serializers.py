@@ -10,9 +10,8 @@ from rest_framework import serializers
 from requisitions.models import (
     AccountabilitySubmission,
     Attachment,
-    BudgetLine,
-    Project,
     Requisition,
+    RequisitionItem,
     RequisitionLog,
     User,
 )
@@ -78,59 +77,14 @@ class LoginSerializer(serializers.Serializer):
         return attrs
 
 
-class ProjectSerializer(serializers.ModelSerializer):
-    """Expose project details and validate model-level date constraints."""
+
+
+class RequisitionItemSerializer(serializers.ModelSerializer):
+    """Serialize individual budget line items."""
 
     class Meta:
-        """List project fields accepted by the API."""
-
-        model = Project
-        fields = ["id", "code", "name", "description", "start_date", "end_date", "is_active"]
-
-    def validate(self, attrs):
-        """Run model validation against the complete instance values."""
-        instance = self.instance or Project()
-        for field, value in attrs.items():
-            setattr(instance, field, value)
-        try:
-            instance.full_clean()
-        except DjangoValidationError as exc:
-            raise serializers.ValidationError(exc.message_dict) from exc
-        return attrs
-
-
-class BudgetLineSerializer(serializers.ModelSerializer):
-    """Expose budget totals and validate allocation constraints."""
-
-    available_amount = serializers.DecimalField(
-        max_digits=14, decimal_places=2, read_only=True
-    )
-
-    class Meta:
-        """Expose budget values and the computed read-only balance."""
-
-        model = BudgetLine
-        fields = [
-            "id",
-            "project",
-            "code",
-            "category",
-            "allocated_amount",
-            "spent_amount",
-            "available_amount",
-            "currency",
-        ]
-
-    def validate(self, attrs):
-        """Run model validation after applying submitted field changes."""
-        instance = self.instance or BudgetLine()
-        for field, value in attrs.items():
-            setattr(instance, field, value)
-        try:
-            instance.full_clean()
-        except DjangoValidationError as exc:
-            raise serializers.ValidationError(exc.message_dict) from exc
-        return attrs
+        model = RequisitionItem
+        fields = ["id", "item_description", "quantity", "unit_cost", "total_cost"]
 
 
 class RequisitionSerializer(serializers.ModelSerializer):
@@ -138,8 +92,8 @@ class RequisitionSerializer(serializers.ModelSerializer):
 
     requestor = serializers.PrimaryKeyRelatedField(read_only=True)
     status = serializers.CharField(read_only=True)
-    project_name = serializers.CharField(source="project.name", read_only=True)
-    budget_line_code = serializers.CharField(source="budget_line.code", read_only=True)
+    activity_display = serializers.CharField(source="get_activity_type_display", read_only=True)
+    items = RequisitionItemSerializer(many=True, read_only=True)
 
     class Meta:
         """Keep ownership and workflow-controlled fields read-only."""
@@ -148,21 +102,43 @@ class RequisitionSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "requestor",
-            "project",
-            "project_name",
-            "budget_line",
-            "budget_line_code",
+            "activity_type",
+            "activity_display",
             "title",
             "description",
             "amount",
             "currency",
+            "voucher_number",
+            "disbursement_method",
             "status",
             "department",
             "requested_at",
             "due_date",
+            "activity_date",
+            "team_lead",
+            "impact",
+            "program",
+            "indicator",
+            "activity_overview",
+            "expected_outcomes",
+            "expected_outputs",
+            "target_number",
+            "inputs",
+            "other_staff",
+            "risk_assessment",
+            "reporting_strategy",
+            "items",
             "last_comment",
         ]
-        read_only_fields = ["id", "requestor", "status", "department", "requested_at"]
+        read_only_fields = [
+            "id",
+            "requestor",
+            "status",
+            "department",
+            "requested_at",
+            "voucher_number",
+            "disbursement_method",
+        ]
 
     def validate(self, attrs):
         """Check model constraints against the instance plus incoming values."""
@@ -229,16 +205,20 @@ class AccountabilitySubmissionSerializer(serializers.ModelSerializer):
             "invoice_file",
             "receipt_download_url",
             "invoice_download_url",
+            "unspent_amount",
             "submitted_at",
             "finance_approved_at",
+            "audit_approved_at",
         ]
         read_only_fields = [
             "id",
             "receipt_download_url",
             "invoice_download_url",
+            "unspent_amount",
             "submitted_by",
             "submitted_at",
             "finance_approved_at",
+            "audit_approved_at",
         ]
 
     def validate(self, attrs):
@@ -333,3 +313,9 @@ class RequisitionActionSerializer(serializers.Serializer):
 
     action = serializers.ChoiceField(choices=RequisitionLog.ACTION_CHOICES)
     comments = serializers.CharField(required=False, allow_blank=True, max_length=5000)
+    disbursement_method = serializers.ChoiceField(
+        choices=Requisition.DISBURSEMENT_METHOD_CHOICES,
+        required=False,
+        allow_blank=True,
+    )
+
