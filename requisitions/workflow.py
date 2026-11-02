@@ -37,10 +37,7 @@ def can_execute_action(user, requisition, action):
     if not user.is_authenticated or not can_transition(requisition.status, action):
         return False
     if action in ("SUBMIT", "RESUBMIT", "SUBMIT_ACCOUNTABILITY"):
-        return (
-            user.role == User.ROLE_EMPLOYEE
-            and requisition.requestor_id == user.pk
-        )
+        return requisition.requestor_id == user.pk
 
     required_status = ROLE_STAGE_MAP.get(user.role)
     if required_status == requisition.status:

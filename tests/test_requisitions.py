@@ -49,8 +49,13 @@ class RequisitionWorkflowTests(TestCase):
         self.admin = User.objects.create_user(
             username="admin",
             email="admin@example.com",
-            password="workflow-test-password",
+            password="test-password",
             role=User.ROLE_ADMIN,
+        )
+        self.superuser = User.objects.create_superuser(
+            username="superuser",
+            email="superuser@example.com",
+            password="test-password",
         )
         self.internal_auditor = User.objects.create_user(
             username="internal-auditor",
@@ -92,24 +97,44 @@ class RequisitionWorkflowTests(TestCase):
         transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
         self.requisition.refresh_from_db()
         self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_SUPERVISOR)
-        self.assertFalse(can_execute_action(self.me_officer, self.requisition, "APPROVE"))
-        self.assertFalse(can_execute_action(self.director, self.requisition, "APPROVE"))
-        self.assertFalse(can_execute_action(self.finance, self.requisition, "APPROVE"))
-        self.assertFalse(can_execute_action(self.admin, self.requisition, "APPROVE"))
+        for unauthorized_approver in (
+            self.me_officer,
+            self.director,
+            self.finance,
+            self.admin,
+            self.superuser,
+        ):
+            self.assertFalse(
+                can_execute_action(unauthorized_approver, self.requisition, "APPROVE")
+            )
         with self.assertRaises(PermissionDenied):
-            transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
+            transition_requisition(self.requisition.pk, self.finance, "APPROVE")
 
         transition_requisition(self.requisition.pk, self.supervisor, "APPROVE")
         self.requisition.refresh_from_db()
         self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_ME)
+        self.assertFalse(can_execute_action(self.supervisor, self.requisition, "APPROVE"))
+        self.assertTrue(can_execute_action(self.me_officer, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.director, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.finance, self.requisition, "APPROVE"))
 
         transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
         self.requisition.refresh_from_db()
         self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_DIRECTOR)
+        self.assertFalse(can_execute_action(self.supervisor, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.me_officer, self.requisition, "APPROVE"))
+        self.assertTrue(can_execute_action(self.director, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.finance, self.requisition, "APPROVE"))
 
         transition_requisition(self.requisition.pk, self.director, "APPROVE")
         self.requisition.refresh_from_db()
         self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_FINANCE)
+        self.assertFalse(can_execute_action(self.supervisor, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.me_officer, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.director, self.requisition, "APPROVE"))
+        self.assertTrue(can_execute_action(self.finance, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.admin, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.superuser, self.requisition, "APPROVE"))
 
         transition_requisition(
             self.requisition.pk,
@@ -127,8 +152,8 @@ class RequisitionWorkflowTests(TestCase):
         )
         self.assertTrue(self.requisition.voucher_number.startswith("FV-"))
 
-    def test_administrative_activity_goes_directly_to_finance_only(self):
-        """Administrative requests skip program reviews but still require Finance."""
+    def test_administrative_activity_routes_directly_to_finance_only(self):
+        """Only administrative activities skip the program approval stages."""
         requisition = Requisition.objects.create(
             requestor=self.employee,
             title="Office supplies",
@@ -142,14 +167,22 @@ class RequisitionWorkflowTests(TestCase):
         transition_requisition(requisition.pk, self.employee, "SUBMIT")
         requisition.refresh_from_db()
         self.assertEqual(requisition.status, Requisition.STATUS_PENDING_FINANCE)
-        self.assertFalse(can_execute_action(self.supervisor, requisition, "APPROVE"))
-        self.assertFalse(can_execute_action(self.me_officer, requisition, "APPROVE"))
-        self.assertFalse(can_execute_action(self.director, requisition, "APPROVE"))
-        self.assertFalse(can_execute_action(self.admin, requisition, "APPROVE"))
         self.assertTrue(can_execute_action(self.finance, requisition, "APPROVE"))
+        for unauthorized_approver in (
+            self.supervisor,
+            self.me_officer,
+            self.director,
+            self.admin,
+            self.superuser,
+        ):
+            self.assertFalse(
+                can_execute_action(unauthorized_approver, requisition, "APPROVE")
+            )
+            with self.assertRaises(PermissionDenied):
+                transition_requisition(
+                    requisition.pk, unauthorized_approver, "APPROVE"
+                )
 
-        with self.assertRaises(PermissionDenied):
-            transition_requisition(requisition.pk, self.director, "APPROVE")
         transition_requisition(
             requisition.pk,
             self.finance,
@@ -160,7 +193,7 @@ class RequisitionWorkflowTests(TestCase):
         self.assertEqual(requisition.status, Requisition.STATUS_DISBURSED)
 
     def test_administrative_resubmission_returns_directly_to_finance(self):
-        """A returned administrative request must not re-enter program reviews."""
+        """Administrative requests remain on the Finance-only route after revision."""
         requisition = Requisition.objects.create(
             requestor=self.employee,
             title="Office supplies",
@@ -180,6 +213,8 @@ class RequisitionWorkflowTests(TestCase):
         transition_requisition(requisition.pk, self.employee, "RESUBMIT")
         requisition.refresh_from_db()
         self.assertEqual(requisition.status, Requisition.STATUS_PENDING_FINANCE)
+        self.assertFalse(can_execute_action(self.supervisor, requisition, "APPROVE"))
+        self.assertTrue(can_execute_action(self.finance, requisition, "APPROVE"))
 
     def test_revision_requires_comment_and_resubmission(self):
         """Review comments are mandatory for revision requests and resubmission restarts the review."""
@@ -266,10 +301,6 @@ class RequisitionWorkflowTests(TestCase):
 
         queue = self.client.get(reverse("approval-queue"))
         self.assertEqual(queue.status_code, 403)
-
-        self.client.force_login(self.admin)
-        create = self.client.get(reverse("requisition-create"))
-        self.assertEqual(create.status_code, 403)
 
         self.client.force_login(self.supervisor)
         queue = self.client.get(reverse("approval-queue"))

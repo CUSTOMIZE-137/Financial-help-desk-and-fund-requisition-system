@@ -192,7 +192,9 @@ def _budget_rows_for_form(request, requisition=None):
 @login_required
 def requisition_create_view(request):
     """Create a request owned by the signed-in employee."""
-    if request.user.role != User.ROLE_EMPLOYEE:
+    if request.user.role != User.ROLE_EMPLOYEE and not (
+        request.user.is_superuser or request.user.role == User.ROLE_ADMIN
+    ):
         raise PermissionDenied
     form = RequisitionForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
@@ -450,8 +452,10 @@ class RequisitionListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         """Enforce creator roles and set ownership and department server-side."""
         user = self.request.user
-        if user.role != User.ROLE_EMPLOYEE:
-            raise DRFPermissionDenied("Only employees can create requisitions.")
+        if user.role != User.ROLE_EMPLOYEE and not (
+            user.is_superuser or user.role == User.ROLE_ADMIN
+        ):
+            raise DRFPermissionDenied("Only employees and administrators can create requisitions.")
         serializer.save(
             requestor=user,
             department=user.department,

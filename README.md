@@ -9,7 +9,7 @@ A Django web application for submitting, reviewing, disbursing, and reconciling 
 3. **M&E Officer** checks the request against indicators and compliance standards.
 4. **Program Director** provides final program approval.
 5. **Finance** reviews the request, creates the voucher, selects bank transfer or petty cash, and records disbursement.
-   Administrative activities are the only exception: submission or resubmission routes directly to Finance, while all other activities must pass through each preceding approval stage.
+   Administrative activities are the only exception: submission or resubmission routes directly to Finance; all non-administrative requests must pass through each preceding approval stage.
 6. **Requester** submits actual spend, an activity report, and receipt or invoice evidence. Any unspent balance is calculated for reconciliation.
 7. **Internal Audit** validates the accountability evidence before closing the request. The final request status is **Completed**.
 
