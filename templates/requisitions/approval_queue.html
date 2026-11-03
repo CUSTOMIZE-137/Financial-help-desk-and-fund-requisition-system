@@ -20,6 +20,9 @@
             <td><span class="badge">{{ item.requisition.get_status_display }}</span></td>
             <td>
               <div class="queue-actions">
+                {% if item.can_download_form %}
+                  <a class="button secondary" href="{% url 'requisition-download' item.requisition.pk %}">Download form</a>
+                {% endif %}
                 {% for action in item.allowed_actions %}
                   <form method="post" action="{% url 'requisition-action' item.requisition.pk %}">
                     {% csrf_token %}

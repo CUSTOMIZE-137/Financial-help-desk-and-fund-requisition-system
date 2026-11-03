@@ -18,7 +18,9 @@ class User(AbstractUser):
     ROLE_EMPLOYEE = "EMPLOYEE"
     ROLE_SUPERVISOR = "SUPERVISOR"
     ROLE_ME_OFFICER = "ME_OFFICER"
-    ROLE_PROGRAM_DIRECTOR = "PROGRAM_DIRECTOR"
+    ROLE_PROGRAM_LEAD = "PROGRAM_LEAD"
+    ROLE_PROGRAM_DIRECTOR = ROLE_PROGRAM_LEAD
+    ROLE_EXECUTIVE_DIRECTOR = "EXECUTIVE_DIRECTOR"
     ROLE_FINANCE = "FINANCE"
     ROLE_INTERNAL_AUDIT = "INTERNAL_AUDIT"
     ROLE_ADMIN = "ADMIN"
@@ -26,7 +28,8 @@ class User(AbstractUser):
         (ROLE_EMPLOYEE, "Employee"),
         (ROLE_SUPERVISOR, "Supervisor"),
         (ROLE_ME_OFFICER, "M&E Officer"),
-        (ROLE_PROGRAM_DIRECTOR, "Program Director"),
+        (ROLE_PROGRAM_LEAD, "Program Lead"),
+        (ROLE_EXECUTIVE_DIRECTOR, "Executive Director"),
         (ROLE_FINANCE, "Finance"),
         (ROLE_INTERNAL_AUDIT, "Internal Audit"),
         (ROLE_ADMIN, "Admin"),
@@ -86,7 +89,9 @@ class Requisition(models.Model):
     STATUS_DRAFT = "DRAFT"
     STATUS_PENDING_SUPERVISOR = "PENDING_SUPERVISOR"
     STATUS_PENDING_ME = "PENDING_ME"
-    STATUS_PENDING_DIRECTOR = "PENDING_DIRECTOR"
+    STATUS_PENDING_PROGRAM_LEAD = "PENDING_PROGRAM_LEAD"
+    STATUS_PENDING_EXECUTIVE_DIRECTOR = "PENDING_EXECUTIVE_DIRECTOR"
+    STATUS_PENDING_DIRECTOR = STATUS_PENDING_EXECUTIVE_DIRECTOR
     STATUS_PENDING_FINANCE = "PENDING_FINANCE"
     STATUS_DISBURSED = "DISBURSED"
     STATUS_AWAITING_ACCOUNTABILITY = "AWAITING_ACCOUNTABILITY"
@@ -97,7 +102,8 @@ class Requisition(models.Model):
         (STATUS_DRAFT, "Draft"),
         (STATUS_PENDING_SUPERVISOR, "Pending Supervisor"),
         (STATUS_PENDING_ME, "Pending M&E"),
-        (STATUS_PENDING_DIRECTOR, "Pending Director"),
+        (STATUS_PENDING_PROGRAM_LEAD, "Pending Program Lead"),
+        (STATUS_PENDING_EXECUTIVE_DIRECTOR, "Pending Executive Director"),
         (STATUS_PENDING_FINANCE, "Pending Finance"),
         (STATUS_DISBURSED, "Disbursed"),
         (STATUS_AWAITING_ACCOUNTABILITY, "Awaiting Internal Audit"),
@@ -107,9 +113,10 @@ class Requisition(models.Model):
     ]
 
     ACTIVITY_NON_ADMINISTRATIVE = "NON_ADMINISTRATIVE"
+    ACTIVITY_PROGRAMS = ACTIVITY_NON_ADMINISTRATIVE
     ACTIVITY_ADMINISTRATIVE = "ADMINISTRATIVE"
     ACTIVITY_CHOICES = [
-        (ACTIVITY_NON_ADMINISTRATIVE, "Non-administrative Activity"),
+        (ACTIVITY_NON_ADMINISTRATIVE, "Programs"),
         (ACTIVITY_ADMINISTRATIVE, "Administrative Activity"),
     ]
     DISBURSEMENT_BANK_TRANSFER = "BANK_TRANSFER"
@@ -295,6 +302,38 @@ class RequisitionLog(models.Model):
         return f"{self.requisition_id}: {self.action}"
 
 
+MAX_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024
+FILE_SIGNATURES = {
+    "pdf": (b"%PDF-",),
+    "png": (b"\x89PNG\r\n\x1a\n",),
+    "jpg": (b"\xff\xd8\xff",),
+    "jpeg": (b"\xff\xd8\xff",),
+}
+
+
+def validate_uploaded_evidence_file(uploaded_file):
+    """Validate file size and magic-byte header for supported evidence types."""
+    if not uploaded_file:
+        return
+    if uploaded_file.size > MAX_UPLOAD_SIZE_BYTES:
+        raise ValidationError("Files must be 15 MB or smaller.")
+    name = getattr(uploaded_file, "name", "") or ""
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    expected_prefixes = FILE_SIGNATURES.get(ext)
+    if expected_prefixes:
+        try:
+            pos = uploaded_file.tell() if hasattr(uploaded_file, "tell") else 0
+            header = uploaded_file.read(8)
+            if hasattr(uploaded_file, "seek"):
+                uploaded_file.seek(pos)
+        except OSError:
+            return
+        if not any(header.startswith(prefix) for prefix in expected_prefixes):
+            raise ValidationError(
+                "Uploaded file content does not match its declared file extension."
+            )
+
+
 class AccountabilitySubmission(models.Model):
     """Liquidation report and supporting proof submitted after disbursement."""
 
@@ -351,8 +390,11 @@ class AccountabilitySubmission(models.Model):
             )
         for field_name in ("receipt_file", "invoice_file"):
             uploaded_file = getattr(self, field_name)
-            if uploaded_file and uploaded_file.size > 15 * 1024 * 1024:
-                raise ValidationError({field_name: "Files must be 15 MB or smaller."})
+            if uploaded_file:
+                try:
+                    validate_uploaded_evidence_file(uploaded_file)
+                except ValidationError as exc:
+                    raise ValidationError({field_name: exc.messages}) from exc
 
     def __str__(self):
         """Identify the request covered by this accountability report."""
@@ -385,10 +427,13 @@ class Attachment(models.Model):
     uploaded_at = models.DateTimeField(default=timezone.now)
 
     def clean(self):
-        """Enforce the per-file upload size limit."""
+        """Enforce the per-file upload size limit and content signature."""
         super().clean()
-        if self.file and self.file.size > 15 * 1024 * 1024:
-            raise ValidationError({"file": "Files must be 15 MB or smaller."})
+        if self.file:
+            try:
+                validate_uploaded_evidence_file(self.file)
+            except ValidationError as exc:
+                raise ValidationError({"file": exc.messages}) from exc
 
     def __str__(self):
         """Describe the attachment by type and associated request."""

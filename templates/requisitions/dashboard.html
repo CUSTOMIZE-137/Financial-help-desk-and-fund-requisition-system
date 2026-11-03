@@ -27,7 +27,7 @@
   {% if requisitions %}
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Request</th><th>Activity</th><th>Amount</th><th>Status</th><th>Submitted</th></tr></thead>
+        <thead><tr><th>Request</th><th>Activity</th><th>Amount</th><th>Status</th><th>Submitted</th>{% if can_download_form %}<th>Filing</th>{% endif %}</tr></thead>
         <tbody>
         {% for item in requisitions %}
           <tr>
@@ -36,6 +36,7 @@
             <td>{{ item.currency }} {{ item.amount|floatformat:2 }}</td>
             <td><span class="badge">{{ item.get_status_display }}</span></td>
             <td>{{ item.requested_at|date:"M j, Y" }}</td>
+            {% if can_download_form %}<td><a class="button secondary" href="{% url 'requisition-download' item.pk %}">Download form</a></td>{% endif %}
           </tr>
         {% endfor %}
         </tbody>

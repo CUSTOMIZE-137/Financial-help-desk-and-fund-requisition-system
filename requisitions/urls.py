@@ -30,6 +30,11 @@ urlpatterns = [
         name="requisition-transition",
     ),
     path(
+        "requisitions/<int:pk>/download/",
+        views.RequisitionDownloadAPIView.as_view(),
+        name="api-requisition-download",
+    ),
+    path(
         "requisition-logs/",
         views.RequisitionLogListView.as_view(),
         name="requisition-log-list",

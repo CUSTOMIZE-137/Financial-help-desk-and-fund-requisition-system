@@ -7,7 +7,7 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.text import get_valid_filename
@@ -27,6 +27,7 @@ from requisitions.models import (
     RequisitionLog,
     User,
 )
+from requisitions.pdf import build_requisition_pdf
 from requisitions.serializers import (
     AccountabilitySubmissionSerializer,
     AttachmentSerializer,
@@ -37,7 +38,9 @@ from requisitions.serializers import (
     UserSerializer,
 )
 from requisitions.workflow import (
+    active_delegate_roles,
     can_access_approval_queue,
+    can_download_requisition_form,
     can_execute_action,
     filter_queryset_by_role,
     transition_requisition,
@@ -49,13 +52,15 @@ def _dashboard_context(user):
     requisitions = filter_queryset_by_role(user, Requisition.objects.all())
     return {
         "requisitions": requisitions[:10],
+        "can_download_form": can_download_requisition_form(user),
         "counts": {
             "total": requisitions.count(),
             "in_review": requisitions.filter(
                 status__in=[
                     Requisition.STATUS_PENDING_SUPERVISOR,
                     Requisition.STATUS_PENDING_ME,
-                    Requisition.STATUS_PENDING_DIRECTOR,
+                    Requisition.STATUS_PENDING_PROGRAM_LEAD,
+                    Requisition.STATUS_PENDING_EXECUTIVE_DIRECTOR,
                     Requisition.STATUS_PENDING_FINANCE,
                 ]
             ).count(),
@@ -82,6 +87,7 @@ def approval_queue_view(request):
     if not can_access_approval_queue(request.user):
         raise PermissionDenied
     candidates = filter_queryset_by_role(request.user, Requisition.objects.select_related("requestor"))
+    delegate_roles = active_delegate_roles(request.user)
     action_names = (
         "APPROVE",
         "REQUEST_REVISION",
@@ -89,16 +95,18 @@ def approval_queue_view(request):
         "FINALIZE_ACCOUNTABILITY",
     )
     queue = []
+    can_download = can_download_requisition_form(request.user, delegate_roles=delegate_roles)
     for item in candidates:
         allowed_actions = [
             action
             for action in action_names
-            if can_execute_action(request.user, item, action)
+            if can_execute_action(request.user, item, action, delegate_roles=delegate_roles)
         ]
         if allowed_actions:
             queue.append({
                 "requisition": item,
                 "allowed_actions": allowed_actions,
+                "can_download_form": can_download,
             })
     return render(request, "requisitions/approval_queue.html", {"requisitions": queue})
 
@@ -275,6 +283,7 @@ def requisition_detail_view(request, pk):
         filter_queryset_by_role(request.user, Requisition.objects.select_related("requestor")),
         pk=pk,
     )
+    delegate_roles = active_delegate_roles(request.user)
     actions = (
         "SUBMIT",
         "APPROVE",
@@ -285,7 +294,9 @@ def requisition_detail_view(request, pk):
         "FINALIZE_ACCOUNTABILITY",
     )
     allowed_actions = [
-        action for action in actions if can_execute_action(request.user, requisition, action)
+        action
+        for action in actions
+        if can_execute_action(request.user, requisition, action, delegate_roles=delegate_roles)
     ]
     return render(
         request,
@@ -296,6 +307,9 @@ def requisition_detail_view(request, pk):
             "logs": requisition.logs.select_related("actor"),
             "accountability": requisition.accountability_submissions.first(),
             "allowed_actions": allowed_actions,
+            "can_download_form": can_download_requisition_form(
+                request.user, requisition, delegate_roles=delegate_roles
+            ),
             "can_edit": (
                 requisition.requestor_id == request.user.pk
                 or request.user.is_superuser
@@ -388,6 +402,34 @@ def protected_file_view(request, kind, pk):
     return _protected_file_response(request.user, kind, pk)
 
 
+@login_required
+def requisition_download_view(request, pk):
+    """Download the printable PDF requisition form for Finance filing."""
+    return _requisition_pdf_response(request.user, pk)
+
+
+def _requisition_pdf_response(user, pk):
+    """Generate and return a PDF requisition form for an authorized finance user."""
+    requisition = get_object_or_404(
+        filter_queryset_by_role(
+            user,
+            Requisition.objects.select_related("requestor").prefetch_related(
+                "items", "logs__actor"
+            ),
+        ),
+        pk=pk,
+    )
+    if not can_download_requisition_form(user, requisition):
+        raise PermissionDenied("Only Finance officers and administrators can download requisition forms.")
+    pdf_bytes = build_requisition_pdf(requisition)
+    filename = get_valid_filename(f"requisition-{requisition.pk}.pdf")
+    response = HttpResponse(pdf_bytes, content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response["Cache-Control"] = "private, no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 def _protected_file_response(user, kind, pk):
     """Resolve and stream a protected evidence file for an authorized user."""
     if kind == "attachment":
@@ -447,7 +489,10 @@ class RequisitionListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         """Apply role-based visibility and preload related display fields."""
-        return filter_queryset_by_role(self.request.user, Requisition.objects.select_related("requestor"))
+        return filter_queryset_by_role(
+            self.request.user,
+            Requisition.objects.select_related("requestor").prefetch_related("items"),
+        )
 
     def perform_create(self, serializer):
         """Enforce creator roles and set ownership and department server-side."""
@@ -464,36 +509,41 @@ class RequisitionListCreateView(generics.ListCreateAPIView):
 
 
 class RequisitionDetailView(generics.RetrieveUpdateAPIView):
-    """Retrieve requests and allow owners to edit only drafts or returned items."""
+    """Retrieve requests and allow owners or administrators to edit drafts or returned items."""
 
     serializer_class = RequisitionSerializer
 
     def get_queryset(self):
         """Limit detail and update lookups to requests visible to the user."""
-        return filter_queryset_by_role(self.request.user, Requisition.objects.all())
+        return filter_queryset_by_role(
+            self.request.user, Requisition.objects.prefetch_related("items")
+        )
 
-    def update(self, request, *args, **kwargs):
-        """Authorize full updates only for the owner of an editable request."""
-        requisition = self.get_object()
-        if requisition.requestor_id != request.user.pk or requisition.status not in (
+    def _check_can_edit(self, user, requisition):
+        """Verify owner or administrator role and editable request status."""
+        is_owner_or_admin = (
+            requisition.requestor_id == user.pk
+            or user.is_superuser
+            or user.role == User.ROLE_ADMIN
+        )
+        if not is_owner_or_admin or requisition.status not in (
             Requisition.STATUS_DRAFT,
             Requisition.STATUS_REVISION_REQUESTED,
         ):
             raise DRFPermissionDenied(
-                "Only the requester can edit a draft or returned requisition."
+                "Only the requester or an administrator can edit a draft or returned requisition."
             )
+
+    def update(self, request, *args, **kwargs):
+        """Authorize full updates only for the owner or admin of an editable request."""
+        requisition = self.get_object()
+        self._check_can_edit(request.user, requisition)
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
-        """Apply the same owner and state restrictions to partial updates."""
+        """Apply the same owner/admin and state restrictions to partial updates."""
         requisition = self.get_object()
-        if requisition.requestor_id != request.user.pk or requisition.status not in (
-            Requisition.STATUS_DRAFT,
-            Requisition.STATUS_REVISION_REQUESTED,
-        ):
-            raise DRFPermissionDenied(
-                "Only the requester can edit a draft or returned requisition."
-            )
+        self._check_can_edit(request.user, requisition)
         return super().partial_update(request, *args, **kwargs)
 
 
@@ -552,6 +602,17 @@ class ProtectedFileAPIView(APIView):
     def get(self, request, kind, pk):
         """Return a protected file after verifying request visibility."""
         return _protected_file_response(request.user, kind, pk)
+
+
+class RequisitionDownloadAPIView(APIView):
+    """Download a printable PDF requisition form through the REST API."""
+
+    def get(self, request, pk):
+        """Return the generated PDF form if the user is authorized for Finance filing."""
+        try:
+            return _requisition_pdf_response(request.user, pk)
+        except PermissionDenied as exc:
+            raise DRFPermissionDenied(str(exc)) from exc
 
 
 class RequisitionLogListView(generics.ListAPIView):

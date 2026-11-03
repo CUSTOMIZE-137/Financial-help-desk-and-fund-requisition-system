@@ -1,23 +1,24 @@
 # Financial Help Desk & Fund Requisition System
 
-A Django web application for submitting, reviewing, disbursing, and reconciling organizational fund requests. It includes a role-based dashboard, a five-stage approval workflow, an authenticated REST API, and an append-only application audit history.
+A Django web application for submitting, reviewing, disbursing, and reconciling organizational fund requests. It includes a role-based dashboard, a multi-stage approval workflow, an authenticated REST API, and an append-only application audit history.
 
 ## Workflow
 
 1. **Employee** creates a draft for the planned activity, adds the justification and amount, and submits it.
 2. **Supervisor** reviews departmental need and activity fit.
 3. **M&E Officer** checks the request against indicators and compliance standards.
-4. **Program Director** provides final program approval.
-5. **Finance** reviews the request, creates the voucher, selects bank transfer or petty cash, and records disbursement.
+4. **Program Lead** reviews program alignment and implementation readiness.
+5. **Executive Director** provides final executive approval (and can approve, request revision, or reject).
+6. **Finance** reviews the request, creates the voucher, selects bank transfer or petty cash, and records disbursement.
    Administrative activities are the only exception: submission or resubmission routes directly to Finance; all non-administrative requests must pass through each preceding approval stage.
-6. **Requester** submits actual spend, an activity report, and receipt or invoice evidence. Any unspent balance is calculated for reconciliation.
-7. **Internal Audit** validates the accountability evidence before closing the request. The final request status is **Completed**.
+7. **Requester** submits actual spend, an activity report, and receipt or invoice evidence. Any unspent balance is calculated for reconciliation.
+8. **Internal Audit** validates the accountability evidence before closing the request. The final request status is **Completed**.
 
 At any approval stage, an approver can request a revision or reject the request. Revision comments and every status transition are recorded in the request history. Final accountability reconciles the approved amount to actual spending.
 
 ## Features
 
-- Role-aware dashboard and approval queue for employees, supervisors, M&E, program directors, finance staff, Internal Audit, and administrators.
+- Role-aware dashboard and approval queue for employees, supervisors, M&E, program leads, executive directors, finance staff, Internal Audit, and administrators.
 - Server-enforced status transitions, department-scoped supervisor approvals, and date-limited delegation.
 - Accountability reports and receipt/invoice uploads, limited to PDF and common image formats, up to 15 MB per file.
 - Read-only audit history and protected, authenticated file downloads.

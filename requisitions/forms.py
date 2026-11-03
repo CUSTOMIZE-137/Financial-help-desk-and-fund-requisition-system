@@ -3,8 +3,13 @@
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django import forms
+from django.core.exceptions import ValidationError
 
-from requisitions.models import AccountabilitySubmission, Requisition
+from requisitions.models import (
+    AccountabilitySubmission,
+    Requisition,
+    validate_uploaded_evidence_file,
+)
 
 
 PROGRAM_ACTIVITY_FIELDS = (
@@ -177,10 +182,14 @@ class AccountabilityForm(forms.ModelForm):
         }
 
     def clean(self):
-        """Apply an upload-size limit before evidence is persisted."""
+        """Apply upload-size and file-signature validation before evidence is persisted."""
         cleaned_data = super().clean()
         for field_name in ("receipt_file", "invoice_file"):
             uploaded_file = cleaned_data.get(field_name)
-            if uploaded_file and uploaded_file.size > 15 * 1024 * 1024:
-                self.add_error(field_name, "Files must be 15 MB or smaller.")
+            if uploaded_file:
+                try:
+                    validate_uploaded_evidence_file(uploaded_file)
+                except ValidationError as exc:
+                    for message in exc.messages:
+                        self.add_error(field_name, message)
         return cleaned_data

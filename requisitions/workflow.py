@@ -32,7 +32,26 @@ def can_access_approval_queue(user):
     return any(role in ROLE_STAGE_MAP for role, _ in active_delegate_roles(user))
 
 
-def can_execute_action(user, requisition, action):
+def can_download_requisition_form(user, requisition=None, delegate_roles=None):
+    """Return whether the user may download printable requisition forms for filing."""
+    if not user.is_authenticated:
+        return False
+    if user.is_superuser or user.role in (User.ROLE_FINANCE, User.ROLE_ADMIN):
+        has_finance_access = True
+    else:
+        if delegate_roles is None:
+            delegate_roles = active_delegate_roles(user)
+        has_finance_access = any(role == User.ROLE_FINANCE for role, _ in delegate_roles)
+    if not has_finance_access:
+        return False
+    if requisition is None:
+        return True
+    return filter_queryset_by_role(
+        user, Requisition.objects.filter(pk=requisition.pk)
+    ).exists()
+
+
+def can_execute_action(user, requisition, action, delegate_roles=None):
     """Check user, role, department, and delegation rules for an action."""
     if not user.is_authenticated or not can_transition(requisition.status, action):
         return False
@@ -42,14 +61,23 @@ def can_execute_action(user, requisition, action):
     required_status = ROLE_STAGE_MAP.get(user.role)
     if required_status == requisition.status:
         if user.role == User.ROLE_SUPERVISOR:
-            return bool(user.department and user.department == requisition.department)
+            return bool(
+                not requisition.is_administrative
+                and user.department
+                and user.department == requisition.department
+            )
         return True
 
-    for role, department in active_delegate_roles(user):
+    if delegate_roles is None:
+        delegate_roles = active_delegate_roles(user)
+
+    for role, department in delegate_roles:
         if ROLE_STAGE_MAP.get(role) != requisition.status:
             continue
         if role == User.ROLE_SUPERVISOR and (
-            not department or department != requisition.department
+            requisition.is_administrative
+            or not department
+            or department != requisition.department
         ):
             continue
         return True
@@ -64,30 +92,47 @@ def filter_queryset_by_role(user, queryset):
     if user.is_superuser or user.role == User.ROLE_ADMIN:
         return queryset
 
-    visible = Q(requestor=user)
+    visible = Q(requestor=user) | Q(logs__actor=user)
     if user.role == User.ROLE_SUPERVISOR and user.department:
         # Administrative activities bypass the supervisor and go directly to finance.
         visible |= Q(department=user.department, activity_type=Requisition.ACTIVITY_NON_ADMINISTRATIVE)
     if user.role == User.ROLE_ME_OFFICER:
         visible |= Q(status=Requisition.STATUS_PENDING_ME)
-    elif user.role == User.ROLE_PROGRAM_DIRECTOR:
-        visible |= Q(status=Requisition.STATUS_PENDING_DIRECTOR)
+    elif user.role == User.ROLE_PROGRAM_LEAD:
+        visible |= Q(status=Requisition.STATUS_PENDING_PROGRAM_LEAD)
+    elif user.role == User.ROLE_EXECUTIVE_DIRECTOR:
+        visible |= Q(status=Requisition.STATUS_PENDING_EXECUTIVE_DIRECTOR)
     elif user.role == User.ROLE_FINANCE:
         visible |= Q(
             status__in=[
                 Requisition.STATUS_PENDING_FINANCE,
                 Requisition.STATUS_DISBURSED,
+                Requisition.STATUS_AWAITING_ACCOUNTABILITY,
+                Requisition.STATUS_COMPLETED,
             ]
         )
     elif user.role == User.ROLE_INTERNAL_AUDIT:
         visible |= Q(status=Requisition.STATUS_AWAITING_ACCOUNTABILITY)
     for role, department in active_delegate_roles(user):
+        if role == User.ROLE_FINANCE:
+            visible |= Q(
+                status__in=[
+                    Requisition.STATUS_PENDING_FINANCE,
+                    Requisition.STATUS_DISBURSED,
+                    Requisition.STATUS_AWAITING_ACCOUNTABILITY,
+                    Requisition.STATUS_COMPLETED,
+                ]
+            )
+            continue
         stage = ROLE_STAGE_MAP.get(role)
         if stage:
             condition = Q(status=stage)
             if role == User.ROLE_SUPERVISOR:
                 if department:
-                    condition &= Q(department=department)
+                    condition &= Q(
+                        department=department,
+                        activity_type=Requisition.ACTIVITY_NON_ADMINISTRATIVE,
+                    )
                 else:
                     continue
             visible |= condition
@@ -147,7 +192,10 @@ def transition_requisition(
             requisition.disbursed_at = timezone.now()
             if not requisition.approved_at:
                 requisition.approved_at = timezone.now()
-        if action == "APPROVE" and previous_status == Requisition.STATUS_PENDING_DIRECTOR:
+        if (
+            action == "APPROVE"
+            and previous_status == Requisition.STATUS_PENDING_EXECUTIVE_DIRECTOR
+        ):
             requisition.approved_at = timezone.now()
         if (
             action == "SUBMIT_ACCOUNTABILITY"

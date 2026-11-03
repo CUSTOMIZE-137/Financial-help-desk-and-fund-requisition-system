@@ -1,13 +1,20 @@
 from datetime import timedelta
 from decimal import Decimal
+import tempfile
 
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
+from rest_framework.test import APIClient
 
 from requisitions.models import AccountabilitySubmission, Requisition, User
-from requisitions.workflow import can_execute_action, transition_requisition
+from requisitions.workflow import (
+    can_execute_action,
+    filter_queryset_by_role,
+    transition_requisition,
+)
 
 
 class RequisitionWorkflowTests(TestCase):
@@ -34,11 +41,17 @@ class RequisitionWorkflowTests(TestCase):
             password="test-password-123",
             role=User.ROLE_ME_OFFICER,
         )
-        self.director = User.objects.create_user(
-            username="director",
-            email="director@example.com",
+        self.program_lead = User.objects.create_user(
+            username="program-lead",
+            email="program-lead@example.com",
             password="test-password-123",
-            role=User.ROLE_PROGRAM_DIRECTOR,
+            role=User.ROLE_PROGRAM_LEAD,
+        )
+        self.executive_director = User.objects.create_user(
+            username="executive-director",
+            email="ed@example.com",
+            password="test-password-123",
+            role=User.ROLE_EXECUTIVE_DIRECTOR,
         )
         self.finance = User.objects.create_user(
             username="finance",
@@ -92,6 +105,18 @@ class RequisitionWorkflowTests(TestCase):
         with self.assertRaises(ValidationError):
             requisition.full_clean()
 
+    def test_requisition_form_activity_dropdown_uses_programs_label(self):
+        """The activity dropdown on the requisition form lists 'Programs' instead of 'Non-administrative Activity'."""
+        self.client.force_login(self.employee)
+        response = self.client.get(reverse("requisition-create"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<option value="NON_ADMINISTRATIVE" selected>Programs</option>',
+            html=True,
+        )
+        self.assertNotContains(response, "Non-administrative Activity")
+
     def test_full_workflow_advances_without_project_or_budget_line(self):
         """Approve a requisition from submission through finance disbursement."""
         transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
@@ -99,7 +124,8 @@ class RequisitionWorkflowTests(TestCase):
         self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_SUPERVISOR)
         for unauthorized_approver in (
             self.me_officer,
-            self.director,
+            self.program_lead,
+            self.executive_director,
             self.finance,
             self.admin,
             self.superuser,
@@ -115,23 +141,39 @@ class RequisitionWorkflowTests(TestCase):
         self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_ME)
         self.assertFalse(can_execute_action(self.supervisor, self.requisition, "APPROVE"))
         self.assertTrue(can_execute_action(self.me_officer, self.requisition, "APPROVE"))
-        self.assertFalse(can_execute_action(self.director, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.program_lead, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.executive_director, self.requisition, "APPROVE"))
         self.assertFalse(can_execute_action(self.finance, self.requisition, "APPROVE"))
 
         transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
         self.requisition.refresh_from_db()
-        self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_DIRECTOR)
+        self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_PROGRAM_LEAD)
         self.assertFalse(can_execute_action(self.supervisor, self.requisition, "APPROVE"))
         self.assertFalse(can_execute_action(self.me_officer, self.requisition, "APPROVE"))
-        self.assertTrue(can_execute_action(self.director, self.requisition, "APPROVE"))
+        self.assertTrue(can_execute_action(self.program_lead, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.executive_director, self.requisition, "APPROVE"))
         self.assertFalse(can_execute_action(self.finance, self.requisition, "APPROVE"))
 
-        transition_requisition(self.requisition.pk, self.director, "APPROVE")
+        transition_requisition(self.requisition.pk, self.program_lead, "APPROVE")
+        self.requisition.refresh_from_db()
+        self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_EXECUTIVE_DIRECTOR)
+        self.assertFalse(can_execute_action(self.supervisor, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.me_officer, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.program_lead, self.requisition, "APPROVE"))
+        self.assertTrue(can_execute_action(self.executive_director, self.requisition, "APPROVE"))
+        self.assertTrue(
+            can_execute_action(self.executive_director, self.requisition, "REQUEST_REVISION")
+        )
+        self.assertTrue(can_execute_action(self.executive_director, self.requisition, "REJECT"))
+        self.assertFalse(can_execute_action(self.finance, self.requisition, "APPROVE"))
+
+        transition_requisition(self.requisition.pk, self.executive_director, "APPROVE")
         self.requisition.refresh_from_db()
         self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_FINANCE)
         self.assertFalse(can_execute_action(self.supervisor, self.requisition, "APPROVE"))
         self.assertFalse(can_execute_action(self.me_officer, self.requisition, "APPROVE"))
-        self.assertFalse(can_execute_action(self.director, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.program_lead, self.requisition, "APPROVE"))
+        self.assertFalse(can_execute_action(self.executive_director, self.requisition, "APPROVE"))
         self.assertTrue(can_execute_action(self.finance, self.requisition, "APPROVE"))
         self.assertFalse(can_execute_action(self.admin, self.requisition, "APPROVE"))
         self.assertFalse(can_execute_action(self.superuser, self.requisition, "APPROVE"))
@@ -171,7 +213,8 @@ class RequisitionWorkflowTests(TestCase):
         for unauthorized_approver in (
             self.supervisor,
             self.me_officer,
-            self.director,
+            self.program_lead,
+            self.executive_director,
             self.admin,
             self.superuser,
         ):
@@ -247,7 +290,8 @@ class RequisitionWorkflowTests(TestCase):
         transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
         transition_requisition(self.requisition.pk, self.supervisor, "APPROVE")
         transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
-        transition_requisition(self.requisition.pk, self.director, "APPROVE")
+        transition_requisition(self.requisition.pk, self.program_lead, "APPROVE")
+        transition_requisition(self.requisition.pk, self.executive_director, "APPROVE")
         transition_requisition(
             self.requisition.pk,
             self.finance,
@@ -283,7 +327,7 @@ class RequisitionWorkflowTests(TestCase):
 
         self.assertEqual(self.requisition.status, Requisition.STATUS_COMPLETED)
         self.assertIsNotNone(submission.audit_approved_at)
-        self.assertEqual(self.requisition.logs.count(), 7)
+        self.assertEqual(self.requisition.logs.count(), 8)
 
     def test_views_hide_approval_controls_from_employees(self):
         """Employees may view their request but cannot see reviewer controls."""
@@ -321,3 +365,238 @@ class RequisitionWorkflowTests(TestCase):
         response = self.client.get("/api/requisitions/")
         self.assertEqual(response.status_code, 200)
         self.assertTrue(any(item["title"] == "Community workshop" for item in response.json()))
+
+    def test_internal_audit_can_request_accountability_revision(self):
+        """Internal Audit can return accountability to Disbursed for re-submission."""
+        transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
+        transition_requisition(self.requisition.pk, self.supervisor, "APPROVE")
+        transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
+        transition_requisition(self.requisition.pk, self.program_lead, "APPROVE")
+        transition_requisition(self.requisition.pk, self.executive_director, "APPROVE")
+        transition_requisition(
+            self.requisition.pk,
+            self.finance,
+            "APPROVE",
+            disbursement_method=Requisition.DISBURSEMENT_BANK_TRANSFER,
+        )
+        AccountabilitySubmission.objects.create(
+            requisition=self.requisition,
+            submitted_by=self.employee,
+            actual_amount_spent=Decimal("150.00"),
+            activity_report="Initial report.",
+            receipt_reference="RCPT-INIT",
+        )
+        transition_requisition(
+            self.requisition.pk,
+            self.employee,
+            "SUBMIT_ACCOUNTABILITY",
+            "Submitted initial accountability.",
+        )
+
+        transition_requisition(
+            self.requisition.pk,
+            self.internal_auditor,
+            "REQUEST_REVISION",
+            "Please attach missing receipt details.",
+        )
+        self.requisition.refresh_from_db()
+        self.assertEqual(self.requisition.status, Requisition.STATUS_DISBURSED)
+        self.assertTrue(
+            can_execute_action(self.employee, self.requisition, "SUBMIT_ACCOUNTABILITY")
+        )
+
+    def test_executive_director_can_request_revision_and_reject(self):
+        """Executive Director can request revision or reject at their approval stage."""
+        transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
+        transition_requisition(self.requisition.pk, self.supervisor, "APPROVE")
+        transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
+        transition_requisition(self.requisition.pk, self.program_lead, "APPROVE")
+        self.requisition.refresh_from_db()
+        self.assertEqual(
+            self.requisition.status, Requisition.STATUS_PENDING_EXECUTIVE_DIRECTOR
+        )
+
+        transition_requisition(
+            self.requisition.pk,
+            self.executive_director,
+            "REQUEST_REVISION",
+            "Clarify executive alignment.",
+        )
+        self.requisition.refresh_from_db()
+        self.assertEqual(self.requisition.status, Requisition.STATUS_REVISION_REQUESTED)
+
+        transition_requisition(self.requisition.pk, self.employee, "RESUBMIT")
+        transition_requisition(self.requisition.pk, self.supervisor, "APPROVE")
+        transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
+        transition_requisition(self.requisition.pk, self.program_lead, "APPROVE")
+        transition_requisition(
+            self.requisition.pk,
+            self.executive_director,
+            "REJECT",
+            "Outside strategic scope.",
+        )
+        self.requisition.refresh_from_db()
+        self.assertEqual(self.requisition.status, Requisition.STATUS_REJECTED)
+        self.assertEqual(self.requisition.rejection_reason, "Outside strategic scope.")
+
+    def test_reviewer_retains_visibility_after_approval(self):
+        """Approvers retain read-only visibility into requests they have previously reviewed."""
+        transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
+        transition_requisition(self.requisition.pk, self.supervisor, "APPROVE")
+        transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
+        self.requisition.refresh_from_db()
+        self.assertEqual(self.requisition.status, Requisition.STATUS_PENDING_PROGRAM_LEAD)
+
+        visible_to_me = filter_queryset_by_role(self.me_officer, Requisition.objects.all())
+        self.assertIn(self.requisition, visible_to_me)
+        self.assertFalse(can_execute_action(self.me_officer, self.requisition, "APPROVE"))
+
+    def test_delegated_supervisor_cannot_see_or_approve_administrative_requests(self):
+        """Delegated supervisors only see non-administrative requests for their department."""
+        today = timezone.localdate()
+        delegate_user = User.objects.create_user(
+            username="delegate-emp",
+            email="delegate@example.com",
+            password="test-password-123",
+            role=User.ROLE_EMPLOYEE,
+            department="Programs",
+        )
+        self.supervisor.delegate = delegate_user
+        self.supervisor.delegate_start_date = today - timedelta(days=1)
+        self.supervisor.delegate_end_date = today + timedelta(days=1)
+        self.supervisor.save()
+
+        admin_req = Requisition.objects.create(
+            requestor=self.employee,
+            title="Admin stationery",
+            description="Stationery purchase.",
+            amount=Decimal("40.00"),
+            currency="UGX",
+            department="Programs",
+            activity_type=Requisition.ACTIVITY_ADMINISTRATIVE,
+        )
+        transition_requisition(admin_req.pk, self.employee, "SUBMIT")
+        visible = filter_queryset_by_role(delegate_user, Requisition.objects.all())
+        self.assertNotIn(admin_req, visible)
+        self.assertFalse(can_execute_action(delegate_user, admin_req, "APPROVE"))
+
+    def test_api_creates_and_updates_requisition_items_and_allows_admin_edits(self):
+        """API supports nested line items and allows administrators to edit draft requests."""
+        api_client = APIClient()
+        api_client.force_authenticate(user=self.employee)
+        create_resp = api_client.post(
+            "/api/requisitions/",
+            {
+                "activity_type": Requisition.ACTIVITY_NON_ADMINISTRATIVE,
+                "title": "API Workshop",
+                "description": "Created with line items.",
+                "indicator": "30 attendees",
+                "items": [
+                    {"item_description": "Venue hire", "quantity": "2.00", "unit_cost": "50.00"},
+                    {"item_description": "Refreshments", "quantity": "10.00", "unit_cost": "5.50"},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(create_resp.status_code, 201, create_resp.data)
+        self.assertEqual(create_resp.data["amount"], "155.00")
+        self.assertEqual(len(create_resp.data["items"]), 2)
+        req_id = create_resp.data["id"]
+
+        api_client.force_authenticate(user=self.admin)
+        patch_resp = api_client.patch(
+            f"/api/requisitions/{req_id}/",
+            {
+                "items": [
+                    {"item_description": "Venue hire updated", "quantity": "1.00", "unit_cost": "80.00"},
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(patch_resp.status_code, 200, patch_resp.data)
+        self.assertEqual(patch_resp.data["amount"], "80.00")
+        self.assertEqual(len(patch_resp.data["items"]), 1)
+
+        paginated_resp = api_client.get("/api/requisitions/?limit=1&offset=0")
+        self.assertEqual(paginated_resp.status_code, 200)
+        self.assertIn("results", paginated_resp.json())
+        self.assertEqual(len(paginated_resp.json()["results"]), 1)
+
+    def test_file_signature_validation_rejects_disguised_files(self):
+        """Uploaded evidence files must match the magic bytes of their declared extension."""
+        self.requisition.status = Requisition.STATUS_DISBURSED
+        self.requisition.save(update_fields=["status"])
+        api_client = APIClient()
+        api_client.force_authenticate(user=self.employee)
+
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                bad_resp = api_client.post(
+                    "/api/accountability/",
+                    {
+                        "requisition": self.requisition.pk,
+                        "actual_amount_spent": "100.00",
+                        "activity_report": "Completed.",
+                        "receipt_file": SimpleUploadedFile(
+                            "fake.pdf",
+                            b"MZ-not-a-real-pdf",
+                            content_type="application/pdf",
+                        ),
+                    },
+                    format="multipart",
+                )
+                self.assertEqual(bad_resp.status_code, 400)
+
+                good_resp = api_client.post(
+                    "/api/accountability/",
+                    {
+                        "requisition": self.requisition.pk,
+                        "actual_amount_spent": "100.00",
+                        "activity_report": "Completed.",
+                        "receipt_file": SimpleUploadedFile(
+                            "valid.pdf",
+                            b"%PDF-1.4 valid receipt content",
+                            content_type="application/pdf",
+                        ),
+                    },
+                    format="multipart",
+                )
+                self.assertEqual(good_resp.status_code, 201, good_resp.data)
+
+    def test_finance_officer_can_download_requisition_form_for_filing(self):
+        """Finance officers see the download button and can download the PDF requisition form."""
+        transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
+        transition_requisition(self.requisition.pk, self.supervisor, "APPROVE")
+        transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
+        transition_requisition(self.requisition.pk, self.program_lead, "APPROVE")
+        transition_requisition(self.requisition.pk, self.executive_director, "APPROVE")
+
+        download_url = reverse("requisition-download", args=[self.requisition.pk])
+
+        # Employees and non-finance reviewers cannot download the filing form
+        self.client.force_login(self.employee)
+        emp_detail = self.client.get(reverse("requisition-detail", args=[self.requisition.pk]))
+        self.assertNotContains(emp_detail, download_url)
+        emp_download = self.client.get(download_url)
+        self.assertEqual(emp_download.status_code, 403)
+
+        # Finance officer sees the download control in dashboard, approval queue, and detail
+        self.client.force_login(self.finance)
+        fin_dashboard = self.client.get(reverse("dashboard"))
+        self.assertContains(fin_dashboard, download_url)
+
+        fin_queue = self.client.get(reverse("approval-queue"))
+        self.assertContains(fin_queue, download_url)
+
+        fin_detail = self.client.get(reverse("requisition-detail", args=[self.requisition.pk]))
+        self.assertContains(fin_detail, download_url)
+
+        pdf_resp = self.client.get(download_url)
+        self.assertEqual(pdf_resp.status_code, 200)
+        self.assertEqual(pdf_resp["Content-Type"], "application/pdf")
+        self.assertIn(
+            f'attachment; filename="requisition-{self.requisition.pk}.pdf"',
+            pdf_resp["Content-Disposition"],
+        )
+        self.assertTrue(pdf_resp.content.startswith(b"%PDF-1.4"))
+        self.assertIn(b"Community workshop", pdf_resp.content)
