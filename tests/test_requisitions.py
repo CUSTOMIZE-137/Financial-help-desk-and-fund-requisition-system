@@ -600,3 +600,42 @@ class RequisitionWorkflowTests(TestCase):
         )
         self.assertTrue(pdf_resp.content.startswith(b"%PDF-1.4"))
         self.assertIn(b"Community workshop", pdf_resp.content)
+        self.assertIn(b"Program Lead", pdf_resp.content)
+        self.assertNotIn(b"Program Director", pdf_resp.content)
+
+    def test_saved_signature_image_is_stamped_on_pdf_when_approved(self):
+        """A user's saved signature image is embedded into the PDF upon approval."""
+        # Minimal valid 1x1 RGB PNG
+        png_1x1 = (
+            b"\x89PNG\r\n\x1a\n"
+            b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+            b"\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\x18\xdd\x8d\xb0"
+            b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                self.client.force_login(self.executive_director)
+                upload_resp = self.client.post(
+                    reverse("signature-settings"),
+                    {
+                        "signature_image": SimpleUploadedFile(
+                            "ed_sig.png", png_1x1, content_type="image/png"
+                        )
+                    },
+                )
+                self.assertEqual(upload_resp.status_code, 302)
+                self.executive_director.refresh_from_db()
+                self.assertTrue(bool(self.executive_director.signature_image))
+
+                transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
+                transition_requisition(self.requisition.pk, self.supervisor, "APPROVE")
+                transition_requisition(self.requisition.pk, self.me_officer, "APPROVE")
+                transition_requisition(self.requisition.pk, self.program_lead, "APPROVE")
+                transition_requisition(self.requisition.pk, self.executive_director, "APPROVE")
+
+                self.client.force_login(self.finance)
+                pdf_resp = self.client.get(
+                    reverse("requisition-download", args=[self.requisition.pk])
+                )
+                self.assertEqual(pdf_resp.status_code, 200)
+                self.assertIn(b"/SigApp Do", pdf_resp.content)

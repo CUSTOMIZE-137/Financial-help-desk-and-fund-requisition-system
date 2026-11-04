@@ -46,6 +46,13 @@ class User(AbstractUser):
     )
     delegate_start_date = models.DateField(null=True, blank=True)
     delegate_end_date = models.DateField(null=True, blank=True)
+    signature_image = models.FileField(
+        upload_to="signatures/%Y/%m/%d/",
+        blank=True,
+        validators=[FileExtensionValidator(["png", "jpg", "jpeg"])],
+        verbose_name="Signature Image",
+        help_text="Upload a PNG or JPEG image of your signature to be stamped on approved requisitions.",
+    )
 
     @property
     def has_active_delegate(self) -> bool:
@@ -60,7 +67,7 @@ class User(AbstractUser):
         )
 
     def clean(self):
-        """Reject self-delegation and incomplete or inverted date ranges."""
+        """Reject self-delegation, invalid date ranges, and disguised signature files."""
         super().clean()
         if self.delegate_id == self.pk and self.pk:
             raise ValidationError({"delegate": "A user cannot delegate to themselves."})
@@ -76,6 +83,11 @@ class User(AbstractUser):
             raise ValidationError(
                 {"delegate_end_date": "The end date must be on or after the start date."}
             )
+        if self.signature_image:
+            try:
+                validate_uploaded_evidence_file(self.signature_image)
+            except ValidationError as exc:
+                raise ValidationError({"signature_image": exc.messages}) from exc
 
     def __str__(self):
         """Show the user's name and assigned workflow role in admin lists."""

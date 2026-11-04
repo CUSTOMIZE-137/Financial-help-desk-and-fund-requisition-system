@@ -1,0 +1,128 @@
+{% extends "requisitions/base.html" %}
+{% block title %}My E-Signature · FinanceDesk{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">ACCOUNT SETTINGS</p>
+    <h1>Saved E-Signature</h1>
+    <p class="muted">Upload your signature image once. Whenever you submit or approve a requisition, your signature is automatically stamped onto the downloadable PDF requisition form.</p>
+  </div>
+</div>
+<section class="panel">
+  {% if request.user.signature_image %}
+    <div style="margin-bottom: 1.25rem;">
+      <p class="muted" style="margin-bottom: 0.5rem;">Current saved signature:</p>
+      <div style="display: inline-block; padding: 0.75rem 1.25rem; border: 1px solid #d8dee4; border-radius: 8px; background: #fff;">
+        <img src="{% url 'protected-file' 'signature' request.user.pk %}" alt="Saved signature" style="max-height: 64px; max-width: 240px; display: block;">
+      </div>
+    </div>
+  {% endif %}
+  <form id="signature-upload-form" method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    {% if form.non_field_errors %}
+      <div class="form-errors">{{ form.non_field_errors }}</div>
+    {% endif %}
+    <div class="form-group">
+      <label for="{{ form.signature_image.id_for_label }}">{{ form.signature_image.label }}</label>
+      {{ form.signature_image }}
+      <p class="muted" style="margin-top: 0.35rem; font-size: 0.875rem;">Supported formats: PNG or JPEG, up to 15 MB. Paper backgrounds and extra margins are automatically cleaned for crisp PDF stamping.</p>
+      {% if form.signature_image.errors %}
+        <div class="field-error">{{ form.signature_image.errors }}</div>
+      {% endif %}
+    </div>
+    <div id="cleaned-preview-wrap" style="display: none; margin-top: 1rem;">
+      <p class="muted" style="margin-bottom: 0.4rem; font-size: 0.875rem;">Enhanced transparent signature preview:</p>
+      <div style="display: inline-block; padding: 0.75rem 1.25rem; border: 1px dashed #94a3b8; border-radius: 8px; background: #fff;">
+        <canvas id="signature-clean-canvas" style="max-height: 64px; max-width: 260px; display: block;"></canvas>
+      </div>
+    </div>
+    <div class="form-actions" style="margin-top: 1rem;">
+      <button class="button primary" type="submit">Save signature</button>
+      <a class="button secondary" href="{% url 'dashboard' %}">Back to dashboard</a>
+    </div>
+  </form>
+</section>
+<script>
+  (function () {
+    const fileInput = document.getElementById("{{ form.signature_image.id_for_label }}");
+    const previewWrap = document.getElementById("cleaned-preview-wrap");
+    const canvas = document.getElementById("signature-clean-canvas");
+    if (!fileInput || !canvas) return;
+
+    fileInput.addEventListener("change", function () {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file || !file.type.startsWith("image/")) return;
+      const reader = new FileReader();
+      reader.onload = function (ev) {
+        const img = new Image();
+        img.onload = function () {
+          const maxDim = 900;
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const off = document.createElement("canvas");
+          off.width = w;
+          off.height = h;
+          const ctx = off.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          const imgData = ctx.getImageData(0, 0, w, h);
+          const d = imgData.data;
+
+          let minX = w, minY = h, maxX = 0, maxY = 0, found = false;
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const i = (y * w + x) * 4;
+              const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+              const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+              if (a < 30 || lum > 205) {
+                d[i + 3] = 0;
+              } else {
+                const boost = Math.max(0, (lum - 40) / 165);
+                d[i] = Math.round(r * boost * 0.6);
+                d[i + 1] = Math.round(g * boost * 0.6);
+                d[i + 2] = Math.round(b * boost * 0.75);
+                d[i + 3] = Math.min(255, Math.round((215 - lum) * 2.2));
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+                found = true;
+              }
+            }
+          }
+          ctx.putImageData(imgData, 0, 0);
+          if (!found) {
+            minX = 0; minY = 0; maxX = w - 1; maxY = h - 1;
+          }
+          const pad = 8;
+          minX = Math.max(0, minX - pad);
+          minY = Math.max(0, minY - pad);
+          maxX = Math.min(w - 1, maxX + pad);
+          maxY = Math.min(h - 1, maxY + pad);
+          const cropW = Math.max(1, maxX - minX + 1);
+          const cropH = Math.max(1, maxY - minY + 1);
+
+          canvas.width = cropW;
+          canvas.height = cropH;
+          const outCtx = canvas.getContext("2d");
+          outCtx.clearRect(0, 0, cropW, cropH);
+          outCtx.drawImage(off, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
+          previewWrap.style.display = "block";
+
+          if (typeof DataTransfer !== "undefined" && canvas.toBlob) {
+            canvas.toBlob(function (blob) {
+              if (!blob) return;
+              const cleanFile = new File([blob], "signature.png", { type: "image/png" });
+              const dt = new DataTransfer();
+              dt.items.add(cleanFile);
+              fileInput.files = dt.files;
+            }, "image/png");
+          }
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  })();
+</script>
+{% endblock %}

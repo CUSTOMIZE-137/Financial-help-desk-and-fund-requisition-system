@@ -24,9 +24,22 @@ class UserAdmin(DjangoUserAdmin):
                 "fields": (
                     "role",
                     "department",
+                    "signature_image",
                     "delegate",
                     "delegate_start_date",
                     "delegate_end_date",
+                )
+            },
+        ),
+    )
+    add_fieldsets = DjangoUserAdmin.add_fieldsets + (
+        (
+            "Help desk access",
+            {
+                "fields": (
+                    "role",
+                    "department",
+                    "signature_image",
                 )
             },
         ),

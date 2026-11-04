@@ -18,7 +18,7 @@ from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from requisitions.forms import AccountabilityForm, RequisitionForm
+from requisitions.forms import AccountabilityForm, RequisitionForm, UserSignatureForm
 from requisitions.models import (
     AccountabilitySubmission,
     Attachment,
@@ -139,6 +139,20 @@ def logout_view(request):
     """End the browser session using a CSRF-protected POST."""
     logout(request)
     return redirect("login")
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def signature_settings_view(request):
+    """Allow the signed-in user to upload or update their saved signature image."""
+    form = UserSignatureForm(
+        request.POST or None, request.FILES or None, instance=request.user
+    )
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Your e-signature image has been saved.")
+        return redirect("signature-settings")
+    return render(request, "requisitions/signature_form.html", {"form": form})
 
 
 def _save_requisition_items(requisition, post_data):
@@ -432,6 +446,25 @@ def _requisition_pdf_response(user, pk):
 
 def _protected_file_response(user, kind, pk):
     """Resolve and stream a protected evidence file for an authorized user."""
+    if kind == "signature":
+        if user.pk != pk and not (user.is_superuser or user.role == User.ROLE_ADMIN):
+            raise Http404
+        target_user = get_object_or_404(User, pk=pk)
+        field = target_user.signature_image
+        if not field:
+            raise Http404
+        try:
+            file_handle = field.open("rb")
+        except OSError as exc:
+            raise Http404("The requested file is unavailable.") from exc
+        response = FileResponse(
+            file_handle,
+            as_attachment=False,
+            filename=get_valid_filename(field.name.rsplit("/", 1)[-1]),
+        )
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
     if kind == "attachment":
         record = get_object_or_404(Attachment.objects.select_related("requisition"), pk=pk)
         field = record.file

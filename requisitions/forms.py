@@ -8,6 +8,7 @@ from django.core.exceptions import ValidationError
 from requisitions.models import (
     AccountabilitySubmission,
     Requisition,
+    User,
     validate_uploaded_evidence_file,
 )
 
@@ -193,3 +194,18 @@ class AccountabilityForm(forms.ModelForm):
                     for message in exc.messages:
                         self.add_error(field_name, message)
         return cleaned_data
+
+
+class UserSignatureForm(forms.ModelForm):
+    """Allow a user to upload or replace their saved e-signature image."""
+
+    class Meta:
+        model = User
+        fields = ["signature_image"]
+        labels = {"signature_image": "Signature image (PNG or JPEG)"}
+
+    def clean_signature_image(self):
+        uploaded_file = self.cleaned_data.get("signature_image")
+        if uploaded_file:
+            validate_uploaded_evidence_file(uploaded_file)
+        return uploaded_file

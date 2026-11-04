@@ -7,6 +7,9 @@ def forwards_update_roles_and_statuses(apps, schema_editor):
     RequisitionLog = apps.get_model("requisitions", "RequisitionLog")
 
     User.objects.filter(role="PROGRAM_DIRECTOR").update(role="PROGRAM_LEAD")
+    User.objects.filter(role="PROGRAM_LEAD", first_name="Program Director").update(
+        first_name="Program Lead"
+    )
     Requisition.objects.filter(status="PENDING_DIRECTOR").update(
         status="PENDING_PROGRAM_LEAD"
     )
