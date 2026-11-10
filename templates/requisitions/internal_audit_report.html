@@ -1,0 +1,63 @@
+{% extends "requisitions/base.html" %}
+{% block title %}Internal Audit Report · FinanceDesk{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">INTERNAL AUDIT</p>
+    <h1>Requisition report</h1>
+    <p class="muted">Report period: {{ period_label }}</p>
+  </div>
+  <a class="button secondary" href="?period={{ period }}&year={{ selected_year }}{% if period == 'month' %}&month={{ selected_month }}{% elif period == 'quarter' %}&quarter={{ selected_quarter }}{% endif %}&format=csv">Download CSV</a>
+</div>
+<section class="panel">
+  <form method="get" class="report-filters">
+    <div class="report-filters-heading">
+      <p class="eyebrow">REPORT PERIOD</p>
+      <p class="muted">Choose the timeframe for this audit report.</p>
+    </div>
+    <div class="report-filter-fields">
+      <div class="report-field">
+        <label for="period">Report type</label>
+        <select id="period" name="period">
+          <option value="month" {% if period == "month" %}selected{% endif %}>Monthly</option>
+          <option value="quarter" {% if period == "quarter" %}selected{% endif %}>Quarterly</option>
+          <option value="year" {% if period == "year" %}selected{% endif %}>Annually</option>
+        </select>
+      </div>
+      <div class="report-field">
+        <label for="year">Year</label>
+        <select id="year" name="year">{% for value in year_choices %}<option value="{{ value }}" {% if value == selected_year %}selected{% endif %}>{{ value }}</option>{% endfor %}</select>
+      </div>
+      <div class="report-field">
+        <label for="month">Month</label>
+        <select id="month" name="month">{% for value in month_choices %}<option value="{{ value }}" {% if value == selected_month %}selected{% endif %}>{{ value }}</option>{% endfor %}</select>
+      </div>
+      <div class="report-field">
+        <label for="quarter">Quarter</label>
+        <select id="quarter" name="quarter">{% for value in quarter_choices %}<option value="{{ value }}" {% if value == selected_quarter %}selected{% endif %}>Q{{ value }}</option>{% endfor %}</select>
+      </div>
+      <button class="button primary report-submit" type="submit">Generate report</button>
+    </div>
+  </form>
+</section>
+<section class="stat-grid">
+  <article class="stat-card"><span>Requests</span><strong>{{ rows|length }}</strong></article>
+  {% for currency, total in totals.items %}<article class="stat-card"><span>Total approved ({{ currency }})</span><strong>{{ total|floatformat:2 }}</strong></article>{% endfor %}
+</section>
+<section class="panel">
+  {% if rows %}
+    <div class="table-wrap"><table>
+      <thead><tr><th>Request</th><th>Requestor</th><th>Amount</th><th>Actual spent</th><th>Unspent</th><th>Status</th><th>Requested</th></tr></thead>
+      <tbody>{% for row in rows %}<tr>
+        <td><a class="table-link" href="{% url 'requisition-detail' row.requisition.pk %}">{{ row.requisition.title }}</a></td>
+        <td>{{ row.requisition.requestor.get_full_name|default:row.requisition.requestor.username }}</td>
+        <td>{{ row.requisition.currency }} {{ row.requisition.amount|floatformat:2 }}</td>
+        <td>{{ row.requisition.currency }} {{ row.spent|floatformat:2 }}</td>
+        <td>{{ row.requisition.currency }} {{ row.unspent|floatformat:2 }}</td>
+        <td><span class="badge">{{ row.requisition.get_status_display }}</span></td>
+        <td>{{ row.requisition.requested_at|date:"M j, Y" }}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+  {% else %}<div class="empty-state"><h3>No requests in this period</h3><p>Choose another reporting period and generate the report again.</p></div>{% endif %}
+</section>
+{% endblock %}

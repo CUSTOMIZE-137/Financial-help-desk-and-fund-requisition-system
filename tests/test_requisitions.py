@@ -1,9 +1,14 @@
 from datetime import timedelta
 from decimal import Decimal
+import io
+from pathlib import Path
+import re
 import tempfile
 
+from django.core import mail
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -351,6 +356,36 @@ class RequisitionWorkflowTests(TestCase):
         self.assertEqual(queue.status_code, 200)
         self.assertContains(queue, "Community workshop")
 
+    def test_internal_audit_can_generate_period_report_and_csv(self):
+        """Only Internal Audit can view a monthly report and export its rows."""
+        self.requisition.requested_at = timezone.make_aware(
+            timezone.datetime(2026, 11, 5, 10, 0)
+        )
+        self.requisition.save(update_fields=["requested_at"])
+
+        self.client.force_login(self.internal_auditor)
+        response = self.client.get(
+            reverse("internal-audit-report"),
+            {"period": "month", "year": 2026, "month": 11},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Community workshop")
+        self.assertContains(response, "November 2026")
+
+        csv_response = self.client.get(
+            reverse("internal-audit-report"),
+            {"period": "month", "year": 2026, "month": 11, "format": "csv"},
+        )
+        self.assertEqual(csv_response.status_code, 200)
+        self.assertEqual(csv_response["Content-Type"], "text/csv")
+        self.assertIn("Community workshop", csv_response.content.decode())
+
+        self.client.force_login(self.finance)
+        self.assertEqual(
+            self.client.get(reverse("internal-audit-report")).status_code,
+            403,
+        )
+
     def test_api_lists_visible_requisitions_for_a_logged_in_user(self):
         """The REST API returns only the requisitions the current user can see."""
         transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
@@ -639,3 +674,240 @@ class RequisitionWorkflowTests(TestCase):
                 )
                 self.assertEqual(pdf_resp.status_code, 200)
                 self.assertIn(b"/SigApp Do", pdf_resp.content)
+
+    def test_admin_enrollment_interface_and_first_login_password_reset(self):
+        """Admins can enroll users with temporary credentials and invitations; users must reset password on first login."""
+        enroll_url = reverse("user-enrollment")
+
+        # Non-admins cannot access the enrollment interface
+        self.client.force_login(self.employee)
+        self.assertEqual(self.client.get(enroll_url).status_code, 403)
+
+        # Admin enrolls a single user and sends an invitation email
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            enroll_url,
+            {
+                "enrollment_action": "single",
+                "username": "newstaff",
+                "email": "newstaff@example.org",
+                "first_name": "Grace",
+                "last_name": "Kato",
+                "role": User.ROLE_SUPERVISOR,
+                "department": "Programs",
+                "send_invitation": "on",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        enrolled_user = User.objects.get(username="newstaff")
+        self.assertTrue(enrolled_user.must_change_password)
+        self.assertEqual(enrolled_user.role, User.ROLE_SUPERVISOR)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("newstaff", mail.outbox[0].body)
+
+        match = re.search(r"Temporary Password:\s*(\S+)", mail.outbox[0].body)
+        self.assertIsNotNone(match)
+        temp_password = match.group(1)
+        self.assertTrue(enrolled_user.check_password(temp_password))
+        self.assertContains(response, temp_password)
+
+        # Enrolled user signs in with temporary password and is redirected to password reset
+        self.client.logout()
+        login_resp = self.client.post(
+            reverse("login"),
+            {"username": "newstaff", "password": temp_password},
+        )
+        self.assertRedirects(login_resp, reverse("password-change"))
+
+        # Navigating to dashboard or API before changing password redirects / returns 403
+        dash_attempt = self.client.get(reverse("dashboard"))
+        self.assertRedirects(dash_attempt, reverse("password-change"))
+        api_attempt = self.client.get("/api/requisitions/")
+        self.assertEqual(api_attempt.status_code, 403)
+
+        # Attempting to reuse the temporary password as the new password fails validation
+        same_pw_resp = self.client.post(
+            reverse("password-change"),
+            {
+                "old_password": temp_password,
+                "new_password1": temp_password,
+                "new_password2": temp_password,
+            },
+        )
+        self.assertEqual(same_pw_resp.status_code, 200)
+        self.assertContains(
+            same_pw_resp,
+            "Your new password must be different from your temporary password.",
+        )
+        enrolled_user.refresh_from_db()
+        self.assertTrue(enrolled_user.must_change_password)
+
+        # Setting a valid distinct password completes enrollment and unlocks the dashboard
+        new_password = "Str0ng!PersonalPassword2026"
+        change_resp = self.client.post(
+            reverse("password-change"),
+            {
+                "old_password": temp_password,
+                "new_password1": new_password,
+                "new_password2": new_password,
+            },
+        )
+        self.assertRedirects(change_resp, reverse("dashboard"))
+        enrolled_user.refresh_from_db()
+        self.assertFalse(enrolled_user.must_change_password)
+        self.assertTrue(enrolled_user.check_password(new_password))
+
+        dash_ok = self.client.get(reverse("dashboard"))
+        self.assertEqual(dash_ok.status_code, 200)
+
+    def test_bulk_csv_enrollment_and_cli_enroll_users_command(self):
+        """Admins can enroll users in bulk via CSV upload or the enroll_users management command."""
+        csv_content = (
+            "username,email,first_name,last_name,role,department\n"
+            "csv_emp,csv_emp@example.org,Alice,Nabirye,EMPLOYEE,Programs\n"
+            "csv_fin,csv_fin@example.org,Brian,Ochen,FINANCE,Finance\n"
+        ).encode("utf-8")
+
+        self.client.force_login(self.admin)
+        resp = self.client.post(
+            reverse("user-enrollment"),
+            {
+                "enrollment_action": "bulk_csv",
+                "csv_file": SimpleUploadedFile("roster.csv", csv_content, content_type="text/csv"),
+                "send_invitation": "on",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(User.objects.filter(username="csv_emp", must_change_password=True).exists())
+        self.assertTrue(User.objects.filter(username="csv_fin", role=User.ROLE_FINANCE, must_change_password=True).exists())
+        self.assertEqual(len(mail.outbox), 2)
+
+        # CLI management command single enrollment & CSV export
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds_file = Path(tmpdir) / "creds.csv"
+            call_command(
+                "enroll_users",
+                username="cli_auditor",
+                email="cli_auditor@example.org",
+                first_name="Samuel",
+                last_name="Okello",
+                role="INTERNAL_AUDIT",
+                department="Audit",
+                output_path=str(creds_file),
+                stdout=out,
+            )
+            cli_user = User.objects.get(username="cli_auditor")
+            self.assertTrue(cli_user.must_change_password)
+            self.assertEqual(cli_user.role, User.ROLE_INTERNAL_AUDIT)
+            self.assertTrue(creds_file.is_file())
+            self.assertIn("cli_auditor", creds_file.read_text(encoding="utf-8"))
+
+    def test_operational_health_and_readiness_endpoints(self):
+        """Liveness and readiness probes report healthy database, cache, and storage status."""
+        health = self.client.get(reverse("healthz"))
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.json()["status"], "ok")
+
+        ready = self.client.get(reverse("readyz"))
+        self.assertEqual(ready.status_code, 200)
+        payload = ready.json()
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["checks"]["database"], "ok")
+        self.assertEqual(payload["checks"]["cache"], "ok")
+        self.assertEqual(payload["checks"]["storage"], "ok")
+
+    def test_dashboard_query_optimization_and_cache_invalidation(self):
+        """Dashboard context uses cached aggregate counts and invalidates automatically on changes."""
+        from requisitions.views import _dashboard_context
+
+        # First call populates delegate roles and dashboard counts caches
+        ctx1 = _dashboard_context(self.employee)
+        self.assertEqual(ctx1["counts"]["total"], 1)
+        self.assertEqual(ctx1["counts"]["in_review"], 0)
+
+        # Second call with warm cache only executes the single SELECT query for recent requisitions
+        with self.assertNumQueries(1):
+            ctx2 = _dashboard_context(self.employee)
+        self.assertEqual(ctx2["counts"]["total"], 1)
+
+        # Transitioning the requisition automatically bumps the cache version
+        transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
+        ctx3 = _dashboard_context(self.employee)
+        self.assertEqual(ctx3["counts"]["in_review"], 1)
+
+    @override_settings(BACKGROUND_TASK_MODE="db_queue", WORKFLOW_EMAIL_NOTIFICATIONS=True)
+    def test_background_task_queue_and_worker_command(self):
+        """Queued background tasks are persisted as PENDING and processed by run_worker."""
+        from requisitions. enrollment import enroll_user
+        from requisitions.models import BackgroundTask
+
+        result = enroll_user(
+            username="bg_user",
+            email="bg_user@example.org",
+            role=User.ROLE_EMPLOYEE,
+            department="Programs",
+            send_invite=True,
+        )
+        self.assertTrue(result.email_sent)
+        # In db_queue mode, email has not been sent yet until the worker runs
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(
+            BackgroundTask.objects.filter(
+                task_name="send_enrollment_invitation",
+                status=BackgroundTask.STATUS_PENDING,
+            ).count(),
+            1,
+        )
+
+        # Transitioning a requisition also queues a workflow notification task
+        transition_requisition(self.requisition.pk, self.employee, "SUBMIT")
+        self.assertEqual(
+            BackgroundTask.objects.filter(
+                task_name="send_workflow_notification",
+                status=BackgroundTask.STATUS_PENDING,
+            ).count(),
+            1,
+        )
+
+        # Run worker once to process all pending tasks
+        out = io.StringIO()
+        call_command("run_worker", once=True, stdout=out)
+        self.assertEqual(
+            BackgroundTask.objects.filter(status=BackgroundTask.STATUS_COMPLETED).count(),
+            2,
+        )
+        self.assertEqual(len(mail.outbox), 2)
+
+    def test_s3_compatible_storage_and_signed_redirect(self):
+        """S3CompatibleStorage saves/reads objects and supports presigned URL redirects."""
+        from unittest.mock import MagicMock
+        from django.core.files.base import ContentFile
+        from financial_helpdesk.storage import S3CompatibleStorage
+
+        storage = S3CompatibleStorage(
+            bucket_name="test-bucket",
+            region_name="us-east-1",
+            key_prefix="media",
+            querystring_expire=120,
+        )
+        mock_client = MagicMock()
+        mock_client.get_object.return_value = {"Body": io.BytesIO(b"%PDF-1.4 test")}
+        mock_client.head_object.return_value = {"ContentLength": 13}
+        mock_client.generate_presigned_url.return_value = (
+            "https://s3.example.com/test-bucket/media/receipts/r1.pdf?sig=abc"
+        )
+        storage._client = mock_client
+
+        saved_name = storage._save("receipts/r1.pdf", ContentFile(b"%PDF-1.4 test"))
+        self.assertEqual(saved_name, "receipts/r1.pdf")
+        mock_client.put_object.assert_called_once()
+        self.assertTrue(storage.exists("receipts/r1.pdf"))
+        self.assertEqual(storage.size("receipts/r1.pdf"), 13)
+        self.assertEqual(storage._open("receipts/r1.pdf").read(), b"%PDF-1.4 test")
+        self.assertIn(
+            "https://s3.example.com/test-bucket/media/receipts/r1.pdf",
+            storage.url("receipts/r1.pdf"),
+        )
+
+

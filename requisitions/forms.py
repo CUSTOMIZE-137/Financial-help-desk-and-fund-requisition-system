@@ -3,6 +3,7 @@
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django import forms
+from django.contrib.auth.forms import PasswordChangeForm
 from django.core.exceptions import ValidationError
 
 from requisitions.models import (
@@ -209,3 +210,95 @@ class UserSignatureForm(forms.ModelForm):
         if uploaded_file:
             validate_uploaded_evidence_file(uploaded_file)
         return uploaded_file
+
+
+class UserEnrollmentForm(forms.Form):
+    """Administrator form for enrolling a new staff user with temporary credentials."""
+
+    username = forms.CharField(
+        max_length=150,
+        label="Username",
+        widget=forms.TextInput(attrs={"placeholder": "e.g. jdoe"}),
+    )
+    email = forms.EmailField(
+        required=True,
+        label="Email address",
+        widget=forms.EmailInput(attrs={"placeholder": "e.g. jdoe@organization.org"}),
+    )
+    first_name = forms.CharField(
+        max_length=150,
+        required=False,
+        label="First name",
+        widget=forms.TextInput(attrs={"placeholder": "e.g. Jane"}),
+    )
+    last_name = forms.CharField(
+        max_length=150,
+        required=False,
+        label="Last name",
+        widget=forms.TextInput(attrs={"placeholder": "e.g. Doe"}),
+    )
+    role = forms.ChoiceField(
+        choices=User.ROLE_CHOICES,
+        initial=User.ROLE_EMPLOYEE,
+        label="Workflow role",
+    )
+    department = forms.CharField(
+        max_length=120,
+        required=False,
+        label="Department",
+        widget=forms.TextInput(attrs={"placeholder": "e.g. Programs, Finance, Operations"}),
+    )
+    send_invitation = forms.BooleanField(
+        required=False,
+        initial=True,
+        label="Send email invitation with temporary credentials",
+    )
+
+    def clean_username(self):
+        username = self.cleaned_data["username"].strip()
+        if User.objects.filter(username=username).exists():
+            raise ValidationError(f"A user with username '{username}' already exists.")
+        return username
+
+
+class BulkUserEnrollmentForm(forms.Form):
+    """Administrator form for enrolling multiple staff accounts from a CSV upload."""
+
+    csv_file = forms.FileField(
+        label="Staff CSV file",
+        help_text="Columns: username, email, first_name, last_name, role, department",
+        widget=forms.ClearableFileInput(attrs={"accept": ".csv,text/csv"}),
+    )
+    send_invitation = forms.BooleanField(
+        required=False,
+        initial=True,
+        label="Send email invitations to enrolled users",
+    )
+    reset_existing = forms.BooleanField(
+        required=False,
+        initial=False,
+        label="Update existing accounts and re-issue temporary passwords if username already exists",
+    )
+
+
+class FirstLoginPasswordChangeForm(PasswordChangeForm):
+    """Enforce setting a distinct new password when signing in with temporary credentials."""
+
+    def clean(self):
+        cleaned_data = super().clean()
+        old_password = cleaned_data.get("old_password")
+        new_password1 = cleaned_data.get("new_password1")
+        if old_password and new_password1 and old_password == new_password1:
+            self.add_error(
+                "new_password1",
+                "Your new password must be different from your temporary password.",
+            )
+        return cleaned_data
+
+    def save(self, commit=True):
+        user = super().save(commit=False)
+        user.must_change_password = False
+        if commit:
+            user.save(update_fields=["password", "must_change_password"])
+        return user
+

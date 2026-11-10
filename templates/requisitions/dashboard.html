@@ -8,9 +8,15 @@
     <h1>Your workspace</h1>
     <p class="muted">Track fund requests through approval, disbursement, and closeout.</p>
   </div>
-  {% if request.user.role == "EMPLOYEE" or request.user.role == "ADMIN" or request.user.is_superuser %}
-    <a class="button primary" href="{% url 'requisition-create' %}">＋ New requisition</a>
-  {% endif %}
+  <div class="action-buttons" style="margin-top: 0;">
+    {% if request.user.role == "INTERNAL_AUDIT" %}<a class="button secondary" href="{% url 'internal-audit-report' %}">Generate audit report</a>{% endif %}
+    {% if request.user.role == "ADMIN" or request.user.is_superuser %}
+      <a class="button secondary" href="{% url 'user-enrollment' %}">Enroll users</a>
+    {% endif %}
+    {% if request.user.role == "EMPLOYEE" or request.user.role == "ADMIN" or request.user.is_superuser %}
+      <a class="button primary" href="{% url 'requisition-create' %}">＋ New requisition</a>
+    {% endif %}
+  </div>
 </div>
 <section class="stat-grid" aria-label="Requisition summary">
   <article class="stat-card"><span>Visible requests</span><strong>{{ counts.total }}</strong></article>

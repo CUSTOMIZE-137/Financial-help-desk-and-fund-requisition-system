@@ -8,6 +8,11 @@ urlpatterns = [
     path("auth/login/", views.LoginAPIView.as_view(), name="api-login"),
     path("auth/logout/", views.LogoutAPIView.as_view(), name="api-logout"),
     path(
+        "auth/password-change/",
+        views.PasswordChangeAPIView.as_view(),
+        name="api-password-change",
+    ),
+    path(
         "files/<str:kind>/<int:pk>/",
         views.ProtectedFileAPIView.as_view(),
         name="api-protected-file",

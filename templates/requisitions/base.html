@@ -17,11 +17,17 @@
       </a>
       {% if request.user.is_authenticated %}
         <nav aria-label="Main navigation">
-          <a href="{% url 'dashboard' %}">Dashboard</a>
-          {% if show_approval_queue %}<a href="{% url 'approval-queue' %}">Approval queue</a>{% endif %}
-          <a href="{% url 'signature-settings' %}">My signature</a>
-          {% if request.user.role == "EMPLOYEE" or request.user.role == "ADMIN" or request.user.is_superuser %}
-            <a class="nav-cta" href="{% url 'requisition-create' %}">New request</a>
+          {% if not request.user.must_change_password %}
+            <a href="{% url 'dashboard' %}">Dashboard</a>
+            {% if show_approval_queue %}<a href="{% url 'approval-queue' %}">Approval queue</a>{% endif %}
+            {% if request.user.role == "INTERNAL_AUDIT" %}<a href="{% url 'internal-audit-report' %}">Audit reports</a>{% endif %}
+            {% if request.user.role == "ADMIN" or request.user.is_superuser %}
+              <a href="{% url 'user-enrollment' %}">User enrollment</a>
+            {% endif %}
+            <a href="{% url 'signature-settings' %}">My signature</a>
+            {% if request.user.role == "EMPLOYEE" or request.user.role == "ADMIN" or request.user.is_superuser %}
+              <a class="nav-cta" href="{% url 'requisition-create' %}">New request</a>
+            {% endif %}
           {% endif %}
         </nav>
         <div class="user-menu">

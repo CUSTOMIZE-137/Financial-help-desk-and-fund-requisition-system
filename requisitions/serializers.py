@@ -9,6 +9,7 @@ from django.core.validators import FileExtensionValidator, MinValueValidator
 from django.urls import reverse
 from rest_framework import serializers
 
+from requisitions.enrollment import generate_temporary_password, send_enrollment_invitation
 from requisitions.models import (
     AccountabilitySubmission,
     Attachment,
@@ -22,9 +23,15 @@ from requisitions.workflow import can_download_requisition_form
 
 
 class UserSerializer(serializers.ModelSerializer):
-    """Serialize staff accounts while accepting passwords only on creation."""
+    """Serialize staff accounts while supporting temporary credential generation and invitations."""
 
-    password = serializers.CharField(write_only=True, required=True, min_length=8)
+    password = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, min_length=8
+    )
+    send_invitation = serializers.BooleanField(
+        write_only=True, required=False, default=False
+    )
+    temporary_password = serializers.CharField(read_only=True)
 
     class Meta:
         """Expose account fields while keeping credentials write-only."""
@@ -37,6 +44,9 @@ class UserSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "password",
+            "temporary_password",
+            "must_change_password",
+            "send_invitation",
             "role",
             "department",
             "delegate",
@@ -46,6 +56,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     def validate_password(self, value):
         """Apply Django's configured password policy to API-created accounts."""
+        if not value:
+            return value
         try:
             validate_password(value)
         except DjangoValidationError as exc:
@@ -53,13 +65,57 @@ class UserSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        """Hash the submitted password instead of storing it as plain text."""
-        password = validated_data.pop("password")
+        """Hash the submitted or generated password and optionally send an enrollment email."""
+        password = validated_data.pop("password", "")
+        send_invitation = validated_data.pop("send_invitation", False)
+        explicit_must_change = "must_change_password" in validated_data
         user = User(**validated_data)
+
+        generated_temp = False
+        if not password:
+            password = generate_temporary_password(user=user)
+            generated_temp = True
+            if not explicit_must_change:
+                user.must_change_password = True
+
         user.set_password(password)
         user.full_clean()
         user.save()
+
+        if generated_temp or user.must_change_password:
+            user.temporary_password = password
+        if send_invitation and user.email:
+            send_enrollment_invitation(
+                user, password, request=self.context.get("request")
+            )
         return user
+
+
+class PasswordChangeSerializer(serializers.Serializer):
+    """Validate and apply a password change for an authenticated user."""
+
+    old_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate_old_password(self, value):
+        user = self.context["request"].user
+        if not user.check_password(value):
+            raise serializers.ValidationError("Your current password was entered incorrectly.")
+        return value
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        old_password = attrs.get("old_password")
+        new_password = attrs.get("new_password")
+        if old_password == new_password:
+            raise serializers.ValidationError(
+                {"new_password": "Your new password must be different from your temporary password."}
+            )
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"new_password": list(exc.messages)}) from exc
+        return attrs
 
 
 class LoginSerializer(serializers.Serializer):
@@ -211,21 +267,26 @@ class RequisitionSerializer(serializers.ModelSerializer):
         return attrs
 
     def _save_items(self, requisition, items_data):
-        """Replace line items and recalculate each row's total cost."""
+        """Replace line items in bulk and recalculate each row's total cost."""
         requisition.items.all().delete()
+        rows = []
         for item in items_data:
             qty = item["quantity"]
             unit_cost = item["unit_cost"]
             total_cost = (qty * unit_cost).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP
             )
-            RequisitionItem.objects.create(
-                requisition=requisition,
-                item_description=item["item_description"].strip(),
-                quantity=qty,
-                unit_cost=unit_cost,
-                total_cost=total_cost,
+            rows.append(
+                RequisitionItem(
+                    requisition=requisition,
+                    item_description=item["item_description"].strip(),
+                    quantity=qty,
+                    unit_cost=unit_cost,
+                    total_cost=total_cost,
+                )
             )
+        if rows:
+            RequisitionItem.objects.bulk_create(rows)
 
     def create(self, validated_data):
         """Create the requisition and any supplied budget line items."""

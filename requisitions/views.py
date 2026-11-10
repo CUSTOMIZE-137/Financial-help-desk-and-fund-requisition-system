@@ -1,24 +1,49 @@
 """HTML views and authenticated REST endpoints for requisitions."""
 
+import csv
+from datetime import date
 from decimal import Decimal
 
+from django.conf import settings
 from django.contrib import messages
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
+from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import transaction
-from django.http import FileResponse, Http404, HttpResponse
+from django.core.files.storage import default_storage
+from django.db import connection, transaction
+from django.db.models import Count, Q
+from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.text import get_valid_filename
-from django.views.decorators.http import require_http_methods, require_POST
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from rest_framework import generics, permissions, status
 from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from requisitions.forms import AccountabilityForm, RequisitionForm, UserSignatureForm
+from app.workflow import ROLE_STAGE_MAP
+from requisitions.cache import (
+    get_cached_dashboard_counts,
+    get_cached_requisition_pdf,
+)
+
+from requisitions.enrollment import (
+    enroll_user,
+    enroll_users_from_csv,
+    issue_temporary_credentials,
+)
+from requisitions.forms import (
+    AccountabilityForm,
+    BulkUserEnrollmentForm,
+    FirstLoginPasswordChangeForm,
+    RequisitionForm,
+    UserEnrollmentForm,
+    UserSignatureForm,
+)
 from requisitions.models import (
     AccountabilitySubmission,
     Attachment,
@@ -32,6 +57,7 @@ from requisitions.serializers import (
     AccountabilitySubmissionSerializer,
     AttachmentSerializer,
     LoginSerializer,
+    PasswordChangeSerializer,
     RequisitionActionSerializer,
     RequisitionLogSerializer,
     RequisitionSerializer,
@@ -47,31 +73,102 @@ from requisitions.workflow import (
 )
 
 
+@require_GET
+def healthz_view(request):
+    """Lightweight liveness probe for container orchestrators and load balancers."""
+    return JsonResponse({"status": "ok", "service": "financial-helpdesk"})
+
+
+@require_GET
+def readyz_view(request):
+    """Readiness probe verifying database, cache, and file storage connectivity."""
+    checks = {}
+    healthy = True
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        checks["database"] = "ok"
+    except Exception as exc:
+        checks["database"] = f"error: {exc}"
+        healthy = False
+
+    try:
+        probe_key = "fh:readyz_probe"
+        cache.set(probe_key, "1", timeout=10)
+        if cache.get(probe_key) == "1":
+            checks["cache"] = "ok"
+        else:
+            checks["cache"] = "error: cache read mismatch"
+            healthy = False
+    except Exception as exc:
+        checks["cache"] = f"error: {exc}"
+        healthy = False
+
+    try:
+        _ = default_storage.__class__.__name__
+        checks["storage"] = "ok"
+    except Exception as exc:
+        checks["storage"] = f"error: {exc}"
+        healthy = False
+
+    status_code = 200 if healthy else 503
+    return JsonResponse(
+        {"status": "ready" if healthy else "degraded", "checks": checks},
+        status=status_code,
+    )
+
+
 def _dashboard_context(user):
-    """Build role-scoped dashboard totals and the latest visible requests."""
-    requisitions = filter_queryset_by_role(user, Requisition.objects.all())
+    """Build role-scoped dashboard totals (in a single cached aggregate query) and latest requests."""
+    requisitions = filter_queryset_by_role(
+        user, Requisition.objects.select_related("requestor")
+    )
+
+    def _compute_counts():
+        agg = requisitions.aggregate(
+            total=Count("id", distinct=True),
+            in_review=Count(
+                "id",
+                filter=Q(
+                    status__in=[
+                        Requisition.STATUS_PENDING_SUPERVISOR,
+                        Requisition.STATUS_PENDING_ME,
+                        Requisition.STATUS_PENDING_PROGRAM_LEAD,
+                        Requisition.STATUS_PENDING_EXECUTIVE_DIRECTOR,
+                        Requisition.STATUS_PENDING_FINANCE,
+                    ]
+                ),
+                distinct=True,
+            ),
+            accountability=Count(
+                "id",
+                filter=Q(
+                    status__in=[
+                        Requisition.STATUS_DISBURSED,
+                        Requisition.STATUS_AWAITING_ACCOUNTABILITY,
+                    ]
+                ),
+                distinct=True,
+            ),
+            completed=Count(
+                "id",
+                filter=Q(status=Requisition.STATUS_COMPLETED),
+                distinct=True,
+            ),
+        )
+        return {
+            "total": agg["total"] or 0,
+            "in_review": agg["in_review"] or 0,
+            "accountability": agg["accountability"] or 0,
+            "completed": agg["completed"] or 0,
+        }
+
     return {
-        "requisitions": requisitions[:10],
+        "requisitions": list(requisitions[:10]),
         "can_download_form": can_download_requisition_form(user),
-        "counts": {
-            "total": requisitions.count(),
-            "in_review": requisitions.filter(
-                status__in=[
-                    Requisition.STATUS_PENDING_SUPERVISOR,
-                    Requisition.STATUS_PENDING_ME,
-                    Requisition.STATUS_PENDING_PROGRAM_LEAD,
-                    Requisition.STATUS_PENDING_EXECUTIVE_DIRECTOR,
-                    Requisition.STATUS_PENDING_FINANCE,
-                ]
-            ).count(),
-            "accountability": requisitions.filter(
-                status__in=[
-                    Requisition.STATUS_DISBURSED,
-                    Requisition.STATUS_AWAITING_ACCOUNTABILITY,
-                ]
-            ).count(),
-            "completed": requisitions.filter(status=Requisition.STATUS_COMPLETED).count(),
-        },
+        "counts": get_cached_dashboard_counts(user, _compute_counts),
     }
 
 
@@ -81,12 +178,118 @@ def dashboard_view(request):
     return render(request, "requisitions/dashboard.html", _dashboard_context(request.user))
 
 
+def _report_period(period, year, month=None, quarter=None):
+    """Return the inclusive start and exclusive end dates for a report period."""
+    if period == "month":
+        start = date(year, month, 1)
+        end = date(year + (month == 12), 1 if month == 12 else month + 1, 1)
+    elif period == "quarter":
+        start_month = ((quarter - 1) * 3) + 1
+        start = date(year, start_month, 1)
+        end = date(year + (start_month == 10), 1 if start_month == 10 else start_month + 3, 1)
+    else:
+        start = date(year, 1, 1)
+        end = date(year + 1, 1, 1)
+    return start, end
+
+
+@login_required
+def internal_audit_report_view(request):
+    """Generate a requisition report for Internal Audit by month, quarter, or year."""
+    if request.user.role != User.ROLE_INTERNAL_AUDIT:
+        raise PermissionDenied
+
+    today = timezone.localdate()
+    period = request.GET.get("period", "month")
+    if period not in {"month", "quarter", "year"}:
+        period = "month"
+    try:
+        year = int(request.GET.get("year", today.year))
+        month = int(request.GET.get("month", today.month))
+        quarter = int(request.GET.get("quarter", ((today.month - 1) // 3) + 1))
+        if not 2000 <= year <= 2100 or not 1 <= month <= 12 or not 1 <= quarter <= 4:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValidationError("Report period values are invalid.")
+
+    start, end = _report_period(period, year, month=month, quarter=quarter)
+    requisitions = list(
+        Requisition.objects.filter(requested_at__date__gte=start, requested_at__date__lt=end)
+        .select_related("requestor")
+        .prefetch_related("accountability_submissions")
+        .order_by("requested_at", "pk")
+    )
+    rows = []
+    totals = {}
+    for requisition in requisitions:
+        accountability = requisition.accountability_submissions.first()
+        spent = accountability.actual_amount_spent if accountability else Decimal("0.00")
+        totals[requisition.currency] = totals.get(requisition.currency, Decimal("0.00")) + requisition.amount
+        rows.append(
+            {
+                "requisition": requisition,
+                "spent": spent,
+                "unspent": requisition.amount - spent,
+            }
+        )
+
+    period_label = {
+        "month": start.strftime("%B %Y"),
+        "quarter": f"Q{quarter} {year}",
+        "year": str(year),
+    }[period]
+    if request.GET.get("format") == "csv":
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = f'attachment; filename="internal-audit-{period_label.replace(" ", "-")}.csv"'
+        writer = csv.writer(response)
+        writer.writerow(["Request", "Requestor", "Department", "Currency", "Approved amount", "Actual spent", "Unspent", "Status", "Requested"])
+        for row in rows:
+            requisition = row["requisition"]
+            writer.writerow(
+                [
+                    requisition.title,
+                    requisition.requestor.get_full_name() or requisition.requestor.username,
+                    requisition.department,
+                    requisition.currency,
+                    requisition.amount,
+                    row["spent"],
+                    row["unspent"],
+                    requisition.get_status_display(),
+                    requisition.requested_at.strftime("%Y-%m-%d"),
+                ]
+            )
+        return response
+
+    return render(
+        request,
+        "requisitions/internal_audit_report.html",
+        {
+            "rows": rows,
+            "totals": totals,
+            "period": period,
+            "period_label": period_label,
+            "selected_year": year,
+            "selected_month": month,
+            "selected_quarter": quarter,
+            "year_choices": range(today.year - 5, today.year + 1),
+            "month_choices": range(1, 13),
+            "quarter_choices": range(1, 5),
+        },
+    )
+
+
 @login_required
 def approval_queue_view(request):
     """Show requests on which the signed-in user can currently act."""
     if not can_access_approval_queue(request.user):
         raise PermissionDenied
-    candidates = filter_queryset_by_role(request.user, Requisition.objects.select_related("requestor"))
+    actionable_statuses = tuple(ROLE_STAGE_MAP.values())
+    candidates = filter_queryset_by_role(
+        request.user,
+        Requisition.objects.filter(status__in=actionable_statuses).select_related(
+            "requestor"
+        ),
+    )
     delegate_roles = active_delegate_roles(request.user)
     action_names = (
         "APPROVE",
@@ -115,6 +318,8 @@ def approval_queue_view(request):
 def login_view(request):
     """Authenticate browser credentials and allow only safe local redirects."""
     if request.user.is_authenticated:
+        if getattr(request.user, "must_change_password", False):
+            return redirect("password-change")
         return redirect("dashboard")
     if request.method == "POST":
         username = request.POST.get("username", "").strip()
@@ -122,6 +327,12 @@ def login_view(request):
         user = authenticate(request, username=username, password=password)
         if user is not None:
             login(request, user)
+            if getattr(user, "must_change_password", False):
+                messages.info(
+                    request,
+                    "Please set a new personal password to complete your account enrollment.",
+                )
+                return redirect("password-change")
             next_url = request.GET.get("next", "")
             if url_has_allowed_host_and_scheme(
                 next_url,
@@ -143,6 +354,140 @@ def logout_view(request):
 
 @login_required
 @require_http_methods(["GET", "POST"])
+def password_change_view(request):
+    """Require users with temporary credentials (or any signed-in user) to set a new password."""
+    is_first_login = bool(getattr(request.user, "must_change_password", False))
+    form = FirstLoginPasswordChangeForm(request.user, request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        user = form.save()
+        update_session_auth_hash(request, user)
+        messages.success(
+            request,
+            "Your password has been updated. Welcome to FinanceDesk!",
+        )
+        return redirect("dashboard")
+    return render(
+        request,
+        "requisitions/password_change.html",
+        {"form": form, "is_first_login": is_first_login},
+    )
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def user_enrollment_view(request):
+    """Allow administrators to enroll users, bulk-import CSV rosters, and re-issue invitations."""
+    if not (request.user.is_superuser or request.user.role == User.ROLE_ADMIN):
+        raise PermissionDenied
+
+    if request.GET.get("format") == "csv-template":
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="staff-enrollment-template.csv"'
+        writer = csv.writer(response)
+        writer.writerow(["username", "email", "first_name", "last_name", "role", "department"])
+        writer.writerow(["jdoe", "jdoe@example.org", "Jane", "Doe", "EMPLOYEE", "Programs"])
+        writer.writerow(["msmith", "msmith@example.org", "Mark", "Smith", "SUPERVISOR", "Programs"])
+        return response
+
+    single_form = UserEnrollmentForm()
+    bulk_form = BulkUserEnrollmentForm()
+    enrolled_results = []
+    bulk_errors = []
+
+    if request.method == "POST":
+        action = request.POST.get("enrollment_action", "single")
+        if action == "single":
+            single_form = UserEnrollmentForm(request.POST)
+            if single_form.is_valid():
+                try:
+                    result = enroll_user(
+                        username=single_form.cleaned_data["username"],
+                        email=single_form.cleaned_data["email"],
+                        first_name=single_form.cleaned_data["first_name"],
+                        last_name=single_form.cleaned_data["last_name"],
+                        role=single_form.cleaned_data["role"],
+                        department=single_form.cleaned_data["department"],
+                        send_invite=single_form.cleaned_data["send_invitation"],
+                        request=request,
+                    )
+                except ValidationError as exc:
+                    for error in exc.messages:
+                        single_form.add_error(None, error)
+                else:
+                    enrolled_results = [result]
+                    single_form = UserEnrollmentForm()
+                    if result.email_sent:
+                        messages.success(
+                            request,
+                            f"Enrolled '{result.user.username}' and sent an invitation to {result.user.email}.",
+                        )
+                    elif result.email_error:
+                        messages.warning(
+                            request,
+                            f"Enrolled '{result.user.username}', but the invitation email could not be sent: {result.email_error}",
+                        )
+                    else:
+                        messages.success(
+                            request,
+                            f"Enrolled '{result.user.username}' with temporary credentials.",
+                        )
+        elif action == "bulk_csv":
+            bulk_form = BulkUserEnrollmentForm(request.POST, request.FILES)
+            if bulk_form.is_valid():
+                uploaded_csv = bulk_form.cleaned_data["csv_file"]
+                enrolled_results, bulk_errors = enroll_users_from_csv(
+                    uploaded_csv.read(),
+                    send_invite=bulk_form.cleaned_data["send_invitation"],
+                    reset_existing=bulk_form.cleaned_data["reset_existing"],
+                    request=request,
+                )
+                if enrolled_results:
+                    messages.success(
+                        request,
+                        f"Successfully enrolled {len(enrolled_results)} user account(s) from CSV.",
+                    )
+                    bulk_form = BulkUserEnrollmentForm()
+                for err in bulk_errors:
+                    messages.error(request, err)
+        elif action == "reinvite":
+            target_user = get_object_or_404(User, pk=request.POST.get("user_id"))
+            result = issue_temporary_credentials(
+                target_user,
+                send_invite=True,
+                request=request,
+            )
+            enrolled_results = [result]
+            if result.email_sent:
+                messages.success(
+                    request,
+                    f"Issued a new temporary password for '{target_user.username}' and sent an invitation to {target_user.email}.",
+                )
+            elif result.email_error:
+                messages.warning(
+                    request,
+                    f"Issued a new temporary password for '{target_user.username}', but email delivery failed: {result.email_error}",
+                )
+            else:
+                messages.success(
+                    request,
+                    f"Issued a new temporary password for '{target_user.username}'.",
+                )
+
+    users = User.objects.all().order_by("username")
+    return render(
+        request,
+        "requisitions/user_enrollment.html",
+        {
+            "single_form": single_form,
+            "bulk_form": bulk_form,
+            "enrolled_results": enrolled_results,
+            "users": users,
+        },
+    )
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
 def signature_settings_view(request):
     """Allow the signed-in user to upload or update their saved signature image."""
     form = UserSignatureForm(
@@ -156,12 +501,13 @@ def signature_settings_view(request):
 
 
 def _save_requisition_items(requisition, post_data):
-    """Save validated budget rows and recalculate the request total server-side."""
+    """Save validated budget rows using a single bulk_create and recalculate the total."""
     descriptions = post_data.getlist("item_description[]")
     quantities = post_data.getlist("quantity[]")
     unit_costs = post_data.getlist("unit_cost[]")
     requisition.items.all().delete()
     total_sum = Decimal("0.00")
+    items_to_create = []
     for desc, qty, unit_cost in zip(descriptions, quantities, unit_costs):
         desc = desc.strip()
         if not desc:
@@ -169,14 +515,18 @@ def _save_requisition_items(requisition, post_data):
         qty_dec = Decimal(qty.strip())
         unit_cost_dec = Decimal(unit_cost.strip())
         total_dec = (qty_dec * unit_cost_dec).quantize(Decimal("0.01"))
-        RequisitionItem.objects.create(
-            requisition=requisition,
-            item_description=desc,
-            quantity=qty_dec,
-            unit_cost=unit_cost_dec,
-            total_cost=total_dec,
+        items_to_create.append(
+            RequisitionItem(
+                requisition=requisition,
+                item_description=desc,
+                quantity=qty_dec,
+                unit_cost=unit_cost_dec,
+                total_cost=total_dec,
+            )
         )
         total_sum += total_dec
+    if items_to_create:
+        RequisitionItem.objects.bulk_create(items_to_create)
     requisition.amount = total_sum
     requisition.save(update_fields=["amount"])
 
@@ -294,7 +644,12 @@ def requisition_edit_view(request, pk):
 def requisition_detail_view(request, pk):
     """Render an authorized request with its history and available actions."""
     requisition = get_object_or_404(
-        filter_queryset_by_role(request.user, Requisition.objects.select_related("requestor")),
+        filter_queryset_by_role(
+            request.user,
+            Requisition.objects.select_related("requestor").prefetch_related(
+                "items", "logs__actor", "accountability_submissions"
+            ),
+        ),
         pk=pk,
     )
     delegate_roles = active_delegate_roles(request.user)
@@ -435,7 +790,9 @@ def _requisition_pdf_response(user, pk):
     )
     if not can_download_requisition_form(user, requisition):
         raise PermissionDenied("Only Finance officers and administrators can download requisition forms.")
-    pdf_bytes = build_requisition_pdf(requisition)
+    pdf_bytes = get_cached_requisition_pdf(
+        requisition, lambda: build_requisition_pdf(requisition)
+    )
     filename = get_valid_filename(f"requisition-{requisition.pk}.pdf")
     response = HttpResponse(pdf_bytes, content_type="application/pdf")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
@@ -445,7 +802,7 @@ def _requisition_pdf_response(user, pk):
 
 
 def _protected_file_response(user, kind, pk):
-    """Resolve and stream a protected evidence file for an authorized user."""
+    """Resolve and stream (or presign-redirect) a protected evidence file for an authorized user."""
     if kind == "signature":
         if user.pk != pk and not (user.is_superuser or user.role == User.ROLE_ADMIN):
             raise Http404
@@ -453,6 +810,8 @@ def _protected_file_response(user, kind, pk):
         field = target_user.signature_image
         if not field:
             raise Http404
+        if getattr(settings, "STORAGE_USE_SIGNED_REDIRECT", False):
+            return redirect(field.storage.url(field.name))
         try:
             file_handle = field.open("rb")
         except OSError as exc:
@@ -481,6 +840,8 @@ def _protected_file_response(user, kind, pk):
         user, Requisition.objects.filter(pk=requisition.pk)
     ).exists():
         raise Http404
+    if getattr(settings, "STORAGE_USE_SIGNED_REDIRECT", False):
+        return redirect(field.storage.url(field.name))
     try:
         file_handle = field.open("rb")
     except OSError as exc:
@@ -503,6 +864,7 @@ class IsSystemAdmin(permissions.BasePermission):
         return bool(
             request.user
             and request.user.is_authenticated
+            and not getattr(request.user, "must_change_password", False)
             and (request.user.is_superuser or request.user.role == User.ROLE_ADMIN)
         )
 
@@ -617,16 +979,45 @@ class LoginAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
         login(request, user)
-        return Response({"detail": "Authenticated", "user_id": user.pk})
+        return Response(
+            {
+                "detail": "Authenticated",
+                "user_id": user.pk,
+                "must_change_password": bool(getattr(user, "must_change_password", False)),
+            }
+        )
 
 
 class LogoutAPIView(APIView):
     """End the current authenticated API session."""
 
+    permission_classes = [permissions.IsAuthenticated]
+
     def post(self, request):
         """Invalidate the session and return a confirmation."""
         logout(request)
         return Response({"detail": "Logged out successfully."})
+
+
+class PasswordChangeAPIView(APIView):
+    """Allow an authenticated API user to complete their first-login password reset."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        """Validate the current and new password, clear must_change_password, and keep session active."""
+        serializer = PasswordChangeSerializer(
+            data=request.data, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        user.set_password(serializer.validated_data["new_password"])
+        user.must_change_password = False
+        user.save(update_fields=["password", "must_change_password"])
+        update_session_auth_hash(request, user)
+        return Response(
+            {"detail": "Password updated successfully.", "must_change_password": False}
+        )
 
 
 class ProtectedFileAPIView(APIView):

@@ -53,6 +53,11 @@ class User(AbstractUser):
         verbose_name="Signature Image",
         help_text="Upload a PNG or JPEG image of your signature to be stamped on approved requisitions.",
     )
+    must_change_password = models.BooleanField(
+        default=False,
+        verbose_name="Require password change on next sign-in",
+        help_text="When enabled, the user must set a new password upon signing in before accessing the workspace.",
+    )
 
     @property
     def has_active_delegate(self) -> bool:
@@ -92,6 +97,15 @@ class User(AbstractUser):
     def __str__(self):
         """Show the user's name and assigned workflow role in admin lists."""
         return f"{self.get_full_name() or self.username} ({self.get_role_display()})"
+
+    class Meta(AbstractUser.Meta):
+        indexes = [
+            models.Index(fields=["role", "department"], name="user_role_dept_idx"),
+            models.Index(
+                fields=["delegate", "is_active", "delegate_start_date", "delegate_end_date"],
+                name="user_active_delegate_idx",
+            ),
+        ]
 
 
 class Requisition(models.Model):
@@ -214,6 +228,20 @@ class Requisition(models.Model):
             ("review_requisition", "Can review a requisition"),
             ("disburse_requisition", "Can disburse a requisition"),
         ]
+        indexes = [
+            models.Index(
+                fields=["status", "department", "activity_type"],
+                name="req_status_dept_act_idx",
+            ),
+            models.Index(
+                fields=["requestor", "-requested_at"],
+                name="req_requestor_date_idx",
+            ),
+            models.Index(
+                fields=["requested_at", "status"],
+                name="req_reqdate_status_idx",
+            ),
+        ]
 
     def clean(self):
         """Validate dates, currency, and program-activity requirements."""
@@ -298,6 +326,10 @@ class RequisitionLog(models.Model):
         """Present the newest audit events first."""
 
         ordering = ["-timestamp"]
+        indexes = [
+            models.Index(fields=["requisition", "-timestamp"], name="reqlog_req_time_idx"),
+            models.Index(fields=["actor", "requisition"], name="reqlog_actor_req_idx"),
+        ]
 
     def save(self, *args, **kwargs):
         """Allow initial creation but reject updates to existing audit entries."""
@@ -450,3 +482,44 @@ class Attachment(models.Model):
     def __str__(self):
         """Describe the attachment by type and associated request."""
         return f"{self.get_file_type_display()} for requisition {self.requisition_id}"
+
+
+class BackgroundTask(models.Model):
+    """Durable background job record for asynchronous emails, notifications, and PDF warming."""
+
+    STATUS_PENDING = "PENDING"
+    STATUS_RUNNING = "RUNNING"
+    STATUS_COMPLETED = "COMPLETED"
+    STATUS_FAILED = "FAILED"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    task_name = models.CharField(max_length=120, db_index=True)
+    payload = models.JSONField(default=dict, blank=True)
+    status = models.CharField(
+        max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True
+    )
+    attempts = models.PositiveSmallIntegerField(default=0)
+    max_attempts = models.PositiveSmallIntegerField(default=3)
+    last_error = models.TextField(blank=True)
+    scheduled_at = models.DateTimeField(default=timezone.now, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["scheduled_at", "id"]
+        indexes = [
+            models.Index(
+                fields=["status", "scheduled_at"],
+                name="bgtask_status_sched_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.task_name} ({self.status})"
+

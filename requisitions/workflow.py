@@ -1,22 +1,30 @@
 """Requisition-specific authorization, visibility, and transition services."""
 
+from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
 from app.workflow import ROLE_STAGE_MAP, can_transition, next_status_for_action
+from requisitions.cache import get_cached_delegate_roles
 from requisitions.models import Requisition, User
 
 
 def active_delegate_roles(user):
     """Return roles delegated to this user whose date ranges include today."""
-    today = timezone.localdate()
-    delegated_approvers = User.objects.filter(
-        delegate=user,
-        is_active=True,
-        delegate_start_date__lte=today,
-        delegate_end_date__gte=today,
-    )
-    return list(delegated_approvers.values_list("role", "department"))
+    if not getattr(user, "is_authenticated", False) or not user.pk:
+        return []
+
+    def _fetch():
+        today = timezone.localdate()
+        delegated_approvers = User.objects.filter(
+            delegate=user,
+            is_active=True,
+            delegate_start_date__lte=today,
+            delegate_end_date__gte=today,
+        )
+        return list(delegated_approvers.values_list("role", "department"))
+
+    return get_cached_delegate_roles(user, _fetch)
 
 
 def can_access_approval_queue(user):
@@ -224,4 +232,23 @@ def transition_requisition(
             new_status=new_status,
             comments=comments.strip(),
         )
+        if new_status in (
+            Requisition.STATUS_PENDING_FINANCE,
+            Requisition.STATUS_DISBURSED,
+        ):
+            from requisitions.tasks import enqueue_task
+
+            enqueue_task("prewarm_requisition_pdf", requisition_id=requisition.pk)
+        if getattr(settings, "WORKFLOW_EMAIL_NOTIFICATIONS", False):
+            from requisitions.tasks import enqueue_task
+
+            enqueue_task(
+                "send_workflow_notification",
+                requisition_id=requisition.pk,
+                action=action,
+                previous_status=previous_status,
+                new_status=new_status,
+                actor_id=actor.pk,
+                comments=comments.strip(),
+            )
         return requisition
