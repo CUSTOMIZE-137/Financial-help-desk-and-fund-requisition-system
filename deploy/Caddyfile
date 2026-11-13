@@ -1,0 +1,18 @@
+# Production Caddy reverse-proxy configuration with automatic HTTPS/TLS
+# Replace financedesk.example.org with your organization's domain name.
+
+financedesk.example.org {
+    encode zstd gzip
+
+    handle_path /static/* {
+        root * /app/staticfiles
+        file_server
+    }
+
+    reverse_proxy web:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}

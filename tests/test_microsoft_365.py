@@ -21,6 +21,7 @@ from django.core import mail
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -698,3 +699,24 @@ class TeamsAndNotificationsIntegrationTests(TestCase):
         self.assertFalse(BackgroundTask.objects.filter(pk=old_completed.pk).exists())
         self.assertTrue(BackgroundTask.objects.filter(pk=recent_completed.pk).exists())
         self.assertTrue(BackgroundTask.objects.filter(pk=pending_task.pk).exists())
+
+    @override_settings(
+        SITE_URL="https://financedesk.example.org",
+        ALLOWED_HOSTS=["financedesk.example.org", "testserver"],
+        CSRF_TRUSTED_ORIGINS=["https://financedesk.example.org"],
+        MICROSOFT_AUTH_ENABLED=True,
+        MICROSOFT_TENANT_ID=TENANT_ID,
+        MICROSOFT_CLIENT_ID=CLIENT_ID,
+        MICROSOFT_CLIENT_SECRET="prod-secret-value",
+        MICROSOFT_ROLE_MAPPING={GROUP_FINANCE: User.ROLE_FINANCE},
+        MICROSOFT_TEAMS_ENABLED=True,
+        MICROSOFT_TEAMS_APP_ID=TEAMS_APP_ID,
+    )
+    def test_check_m365_readiness_command_validates_cutover_configuration(self):
+        out = io.StringIO()
+        call_command("check_m365_readiness", strict=True, stdout=out)
+        self.assertIn("Microsoft 365 readiness check passed", out.getvalue())
+
+        with self.settings(SITE_URL="http://financedesk.example.org"):
+            with self.assertRaises(CommandError):
+                call_command("check_m365_readiness", strict=True, stdout=io.StringIO())

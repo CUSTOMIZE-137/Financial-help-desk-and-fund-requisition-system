@@ -376,11 +376,19 @@ MICROSOFT_TEAMS_WEBHOOK_URL = os.getenv("MICROSOFT_TEAMS_WEBHOOK_URL", "").strip
 SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
 CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
 
-# Brute-force protection for local username/password authentication endpoints.
-AUTH_RATE_LIMIT_ATTEMPTS = int(os.getenv("AUTH_RATE_LIMIT_ATTEMPTS", "5"))
-AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
-LOGIN_RATE_LIMIT = int(os.getenv("LOGIN_RATE_LIMIT", "10"))
-LOGIN_RATE_WINDOW_SECONDS = int(os.getenv("LOGIN_RATE_WINDOW_SECONDS", "300"))
+# Brute-force protection for local username/password authentication endpoints and REST API throttling.
+LOGIN_RATE_LIMIT = int(
+    os.getenv("LOGIN_RATE_LIMIT", os.getenv("AUTH_RATE_LIMIT_ATTEMPTS", "10"))
+)
+LOGIN_RATE_WINDOW_SECONDS = int(
+    os.getenv(
+        "LOGIN_RATE_WINDOW_SECONDS", os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300")
+    )
+)
+AUTH_RATE_LIMIT_ATTEMPTS = LOGIN_RATE_LIMIT
+AUTH_RATE_LIMIT_WINDOW_SECONDS = LOGIN_RATE_WINDOW_SECONDS
+API_THROTTLE_RATE_ANON = os.getenv("API_THROTTLE_RATE_ANON", "120/min").strip()
+API_THROTTLE_RATE_USER = os.getenv("API_THROTTLE_RATE_USER", "600/min").strip()
 
 # Browser sessions support the UI; Basic auth is available to API clients.
 REST_FRAMEWORK = {
@@ -392,6 +400,14 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.IsAuthenticated",
         "requisitions.middleware.PasswordResetCompletedPermission",
     ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": API_THROTTLE_RATE_ANON,
+        "user": API_THROTTLE_RATE_USER,
+    },
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.LimitOffsetPagination",
 }
 
