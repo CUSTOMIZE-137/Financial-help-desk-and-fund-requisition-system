@@ -38,6 +38,11 @@ class ForcePasswordChangeMiddleware:
                 reverse("password-change"),
                 reverse("logout"),
                 reverse("login"),
+                reverse("microsoft-login"),
+                reverse("microsoft-callback"),
+                reverse("teams-tab"),
+                reverse("teams-auth-start"),
+                reverse("teams-auth-end"),
                 reverse("api-login"),
                 reverse("api-logout"),
                 reverse("api-password-change"),
@@ -56,3 +61,35 @@ class ForcePasswordChangeMiddleware:
                     )
                 return redirect("password-change")
         return self.get_response(request)
+
+
+class TeamsFrameAncestorsMiddleware:
+    """Allow Microsoft Teams tab embedding via strict CSP frame-ancestors when enabled."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        # Only Teams entry points need to be embeddable. Keep normal pages protected
+        # by X-Frame-Options and the default clickjacking policy.
+        if getattr(settings, "MICROSOFT_TEAMS_ENABLED", False) and request.path.startswith(
+            "/teams/"
+        ):
+            ancestors = getattr(
+                settings,
+                "MICROSOFT_TEAMS_FRAME_ANCESTORS",
+                "https://teams.microsoft.com https://*.teams.microsoft.com https://*.skype.com https://*.office.com",
+            ).strip()
+            frame_policy = f"frame-ancestors 'self' {ancestors}".strip()
+            existing_csp = response.get("Content-Security-Policy", "").strip()
+            if not existing_csp:
+                response["Content-Security-Policy"] = frame_policy
+            elif "frame-ancestors" not in existing_csp:
+                response["Content-Security-Policy"] = f"{existing_csp}; {frame_policy}"
+            # Modern browsers enforce CSP frame-ancestors over X-Frame-Options, but removing
+            # X-Frame-Options: DENY prevents legacy WebView blocks inside Teams clients.
+            if "X-Frame-Options" in response:
+                del response["X-Frame-Options"]
+            response.xframe_options_exempt = True
+        return response

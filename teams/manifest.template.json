@@ -1,0 +1,58 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "${{MICROSOFT_TEAMS_APP_ID}}",
+  "packageName": "org.financedesk.requisitions",
+  "developer": {
+    "name": "FinanceDesk Operations",
+    "websiteUrl": "https://${{SITE_DOMAIN}}",
+    "privacyUrl": "https://${{SITE_DOMAIN}}/login/",
+    "termsOfUseUrl": "https://${{SITE_DOMAIN}}/login/"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "FinanceDesk",
+    "full": "Financial Help Desk & Fund Requisition System"
+  },
+  "description": {
+    "short": "Submit fund requisitions, review approvals, and track accountability.",
+    "full": "Access the organization's Financial Help Desk and Fund Requisition System directly in Microsoft Teams to manage requisitions, approval queues, and liquidation evidence."
+  },
+  "accentColor": "#0F4C81",
+  "staticTabs": [
+    {
+      "entityId": "financedesk-dashboard",
+      "name": "Dashboard",
+      "contentUrl": "https://${{SITE_DOMAIN}}/teams/tab/?target=dashboard",
+      "websiteUrl": "https://${{SITE_DOMAIN}}/",
+      "scopes": [
+        "personal"
+      ]
+    },
+    {
+      "entityId": "financedesk-approval-queue",
+      "name": "Approval Queue",
+      "contentUrl": "https://${{SITE_DOMAIN}}/teams/tab/?target=approval-queue",
+      "websiteUrl": "https://${{SITE_DOMAIN}}/approval-queue/",
+      "scopes": [
+        "personal"
+      ]
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [
+    "${{SITE_DOMAIN}}",
+    "login.microsoftonline.com"
+  ],
+  "webApplicationInfo": {
+    "id": "${{MICROSOFT_CLIENT_ID}}",
+    "resource": "api://${{SITE_DOMAIN}}/${{MICROSOFT_CLIENT_ID}}"
+  }
+}

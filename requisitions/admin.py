@@ -31,10 +31,14 @@ class UserAdmin(DjangoUserAdmin):
                     "delegate",
                     "delegate_start_date",
                     "delegate_end_date",
+                    "entra_object_id",
+                    "entra_tenant_id",
+                    "entra_last_sync_at",
                 )
             },
         ),
     )
+    readonly_fields = ("entra_last_sync_at",)
     add_fieldsets = DjangoUserAdmin.add_fieldsets + (
         (
             "Help desk access",

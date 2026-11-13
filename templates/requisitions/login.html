@@ -3,7 +3,7 @@
 {% block title %}Sign in · FinanceDesk{% endblock %}
 {% block header %}{% endblock %}
 {% block content %}
-<!-- The form posts credentials with CSRF protection; the view reports invalid logins. -->
+<!-- Supports Microsoft Entra ID SSO and/or local username/password authentication. -->
 <section class="auth-card">
   <div class="auth-brand">
     <img src="{% static 'images/organization-logo.png' %}" alt="">
@@ -11,13 +11,32 @@
   </div>
   <h1>Welcome back</h1>
   <p class="muted">Sign in to manage requests, approvals, and accountability.</p>
-  <form method="post">
-    {% csrf_token %}
-    <label for="username">Username</label>
-    <input id="username" name="username" autocomplete="username" required autofocus>
-    <label for="password">Password</label>
-    <input id="password" name="password" type="password" autocomplete="current-password" required>
-    <button class="button primary full" type="submit">Sign in</button>
-  </form>
+
+  {% if microsoft_auth_enabled %}
+    <div class="sso-actions" style="margin-bottom: 1rem;">
+      <a
+        class="button primary full sso-microsoft-button"
+        href="{% url 'microsoft-login' %}{% if next_url %}?next={{ next_url|urlencode }}{% endif %}"
+      >
+        Sign in with Microsoft
+      </a>
+    </div>
+    {% if allow_local_login %}
+      <p class="muted" style="text-align: center; margin: 0.75rem 0; font-size: 0.875rem;">
+        — or sign in with your local account —
+      </p>
+    {% endif %}
+  {% endif %}
+
+  {% if allow_local_login or not microsoft_auth_enabled %}
+    <form method="post">
+      {% csrf_token %}
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required {% if not microsoft_auth_enabled %}autofocus{% endif %}>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button class="button {% if microsoft_auth_enabled %}secondary{% else %}primary{% endif %} full" type="submit">Sign in</button>
+    </form>
+  {% endif %}
 </section>
 {% endblock %}

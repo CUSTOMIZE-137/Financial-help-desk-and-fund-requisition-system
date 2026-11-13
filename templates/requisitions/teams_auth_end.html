@@ -1,0 +1,40 @@
+{% extends "requisitions/base.html" %}
+{% block title %}Completing Microsoft Sign-In · FinanceDesk{% endblock %}
+{% block header %}{% endblock %}
+{% block content %}
+<section class="auth-card" id="teams-auth-result" data-success="{{ auth_success|yesno:'true,false' }}" data-error="{{ error_message }}">
+  <h1>{% if auth_success %}Signed in{% else %}Sign-in error{% endif %}</h1>
+  <p class="muted">
+    {% if auth_success %}
+      Completing sign-in and returning to Microsoft Teams...
+    {% else %}
+      {{ error_message|default:"Could not complete Microsoft sign-in." }}
+    {% endif %}
+  </p>
+  <a class="button secondary full" href="{% url 'dashboard' %}">Continue to FinanceDesk</a>
+</section>
+<script src="https://res.cdn.office.net/teams-js/2.22.0/js/MicrosoftTeams.min.js" crossorigin="anonymous"></script>
+<script>
+(function () {
+  var el = document.getElementById("teams-auth-result");
+  if (!el) return;
+  var ok = el.getAttribute("data-success") === "true";
+  var err = el.getAttribute("data-error") || "Authentication failed";
+  if (window.microsoftTeams && window.microsoftTeams.app) {
+    window.microsoftTeams.app.initialize().then(function () {
+      if (ok) {
+        window.microsoftTeams.authentication.notifySuccess("authenticated");
+      } else {
+        window.microsoftTeams.authentication.notifyFailure(err);
+      }
+    }).catch(function () {
+      if (ok) {
+        window.location.replace("{% url 'dashboard' %}");
+      }
+    });
+  } else if (ok) {
+    window.location.replace("{% url 'dashboard' %}");
+  }
+})();
+</script>
+{% endblock %}

@@ -38,6 +38,9 @@
           <span>{{ request.user.get_full_name|default:request.user.username }}</span>
           <form method="post" action="{% url 'logout' %}">
             {% csrf_token %}
+            {% if request.user.entra_object_id %}
+              <input type="hidden" name="microsoft_logout" value="1">
+            {% endif %}
             <button class="link-button" type="submit">Sign out</button>
           </form>
         </div>

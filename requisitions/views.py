@@ -15,6 +15,7 @@ from django.db import connection, transaction
 from django.db.models import Count, Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.text import get_valid_filename
@@ -35,6 +36,18 @@ from requisitions.enrollment import (
     enroll_user,
     enroll_users_from_csv,
     issue_temporary_credentials,
+)
+from requisitions.entra_auth import (
+    EntraAccessDeniedError,
+    EntraAuthError,
+    OIDC_SESSION_KEY,
+    OIDC_STATE_MAX_AGE_SECONDS,
+    authenticate_or_provision_entra_user,
+    build_authorization_request,
+    build_logout_url,
+    exchange_code_for_tokens,
+    is_microsoft_auth_enabled,
+    verify_id_token,
 )
 from requisitions.forms import (
     AccountabilityForm,
@@ -71,6 +84,36 @@ from requisitions.workflow import (
     filter_queryset_by_role,
     transition_requisition,
 )
+
+
+def _login_throttle_key(request, username: str) -> str:
+    """Build a cache key scoped to the source address and attempted username."""
+    client_ip = request.META.get("REMOTE_ADDR", "unknown").strip() or "unknown"
+    normalized_username = (username or "").strip().lower()[:150]
+    return f"fh:login-fail:{client_ip}:{normalized_username}"
+
+
+def _login_is_throttled(request, username: str) -> bool:
+    """Return whether repeated failed attempts have reached the configured limit."""
+    limit = max(int(getattr(settings, "LOGIN_RATE_LIMIT", 10)), 1)
+    return int(cache.get(_login_throttle_key(request, username), 0) or 0) >= limit
+
+
+def _record_failed_login(request, username: str) -> None:
+    """Record a failed login attempt with a bounded cache lifetime."""
+    key = _login_throttle_key(request, username)
+    window = max(int(getattr(settings, "LOGIN_RATE_WINDOW_SECONDS", 300)), 1)
+    if cache.add(key, 1, timeout=window):
+        return
+    try:
+        cache.incr(key)
+    except ValueError:
+        cache.set(key, 1, timeout=window)
+
+
+def _clear_failed_logins(request, username: str) -> None:
+    """Clear failed-attempt state after a successful login."""
+    cache.delete(_login_throttle_key(request, username))
 
 
 @require_GET
@@ -321,11 +364,42 @@ def login_view(request):
         if getattr(request.user, "must_change_password", False):
             return redirect("password-change")
         return redirect("dashboard")
+    microsoft_enabled = is_microsoft_auth_enabled()
+    allow_local_login = bool(getattr(settings, "MICROSOFT_ALLOW_LOCAL_LOGIN", True))
+    next_url = request.GET.get("next", "")
     if request.method == "POST":
+        if microsoft_enabled and not allow_local_login:
+            messages.error(
+                request,
+                "Local password sign-in is disabled. Please sign in with Microsoft.",
+            )
+            return render(
+                request,
+                "requisitions/login.html",
+                {
+                    "microsoft_auth_enabled": microsoft_enabled,
+                    "allow_local_login": allow_local_login,
+                    "next_url": next_url,
+                },
+                status=403,
+            )
         username = request.POST.get("username", "").strip()
         password = request.POST.get("password", "")
+        if _login_is_throttled(request, username):
+            messages.error(request, "Too many failed sign-in attempts. Please try again later.")
+            return render(
+                request,
+                "requisitions/login.html",
+                {
+                    "microsoft_auth_enabled": microsoft_enabled,
+                    "allow_local_login": allow_local_login,
+                    "next_url": next_url,
+                },
+                status=429,
+            )
         user = authenticate(request, username=username, password=password)
         if user is not None:
+            _clear_failed_logins(request, username)
             login(request, user)
             if getattr(user, "must_change_password", False):
                 messages.info(
@@ -333,7 +407,6 @@ def login_view(request):
                     "Please set a new personal password to complete your account enrollment.",
                 )
                 return redirect("password-change")
-            next_url = request.GET.get("next", "")
             if url_has_allowed_host_and_scheme(
                 next_url,
                 allowed_hosts={request.get_host()},
@@ -341,15 +414,243 @@ def login_view(request):
             ):
                 return redirect(next_url)
             return redirect("dashboard")
+        _record_failed_login(request, username)
         messages.error(request, "Invalid username or password.")
-    return render(request, "requisitions/login.html")
+    return render(
+        request,
+        "requisitions/login.html",
+        {
+            "microsoft_auth_enabled": microsoft_enabled,
+            "allow_local_login": allow_local_login,
+            "next_url": next_url,
+        },
+    )
 
 
 @require_POST
 def logout_view(request):
     """End the browser session using a CSRF-protected POST."""
+    was_microsoft_user = bool(
+        request.user.is_authenticated and getattr(request.user, "entra_object_id", "")
+    )
     logout(request)
+    if (
+        was_microsoft_user
+        and request.POST.get("microsoft_logout") == "1"
+        and is_microsoft_auth_enabled()
+    ):
+        try:
+            return redirect(build_logout_url(request))
+        except EntraAuthError:
+            pass
     return redirect("login")
+
+
+@require_GET
+def microsoft_login_view(request):
+    """Start the Microsoft Entra ID OIDC + PKCE authorization code flow."""
+    if not is_microsoft_auth_enabled():
+        messages.error(request, "Microsoft sign-in is not currently enabled.")
+        return redirect("login")
+
+    raw_next = request.GET.get("next", "")
+    safe_next = (
+        raw_next
+        if url_has_allowed_host_and_scheme(
+            raw_next,
+            allowed_hosts={request.get_host()},
+            require_https=request.is_secure(),
+        )
+        else ""
+    )
+    teams_popup = request.GET.get("teams_popup") == "1"
+    login_hint = request.GET.get("login_hint", "").strip()
+    try:
+        authorize_url = build_authorization_request(
+            request,
+            next_url=safe_next,
+            teams_popup=teams_popup,
+            login_hint=login_hint,
+        )
+    except EntraAuthError as exc:
+        messages.error(request, exc.user_message)
+        return redirect("login")
+    return redirect(authorize_url)
+
+
+@require_GET
+def microsoft_callback_view(request):
+    """Validate the Entra ID OIDC callback, link/provision the user, and start a session."""
+    import secrets
+    import time
+
+    if not is_microsoft_auth_enabled():
+        messages.error(request, "Microsoft sign-in is not currently enabled.")
+        return redirect("login")
+
+    flow = request.session.pop(OIDC_SESSION_KEY, None)
+    is_teams_popup = bool(isinstance(flow, dict) and flow.get("teams_popup"))
+
+    def _fail(user_msg: str, status_code: int = 400):
+        if is_teams_popup:
+            return render(
+                request,
+                "requisitions/teams_auth_end.html",
+                {"auth_success": False, "error_message": user_msg},
+                status=status_code,
+            )
+        messages.error(request, user_msg)
+        return redirect("login")
+
+    oauth_error = request.GET.get("error", "").strip()
+    if oauth_error:
+        return _fail("Microsoft sign-in was cancelled or denied by the identity provider.")
+
+    if not isinstance(flow, dict):
+        return _fail("Your sign-in session expired or is invalid. Please try again.")
+
+    created_at = int(flow.get("created_at") or 0)
+    if (int(time.time()) - created_at) > OIDC_STATE_MAX_AGE_SECONDS:
+        return _fail("Your sign-in request timed out. Please try signing in again.")
+
+    returned_state = request.GET.get("state", "")
+    expected_state = str(flow.get("state") or "")
+    if (
+        not returned_state
+        or not expected_state
+        or not secrets.compare_digest(returned_state, expected_state)
+    ):
+        return _fail("Invalid authentication state. Please try signing in again.")
+
+    code = request.GET.get("code", "").strip()
+    if not code:
+        return _fail("Authorization code was not provided by Microsoft.")
+
+    try:
+        token_data = exchange_code_for_tokens(
+            code=code,
+            code_verifier=str(flow.get("code_verifier") or ""),
+            redirect_uri=str(flow.get("redirect_uri") or ""),
+        )
+        id_token = str(token_data.get("id_token") or "")
+        access_token = str(token_data.get("access_token") or "")
+        claims = verify_id_token(
+            id_token,
+            expected_nonce=str(flow.get("nonce") or ""),
+        )
+        sync_result = authenticate_or_provision_entra_user(
+            claims,
+            access_token=access_token,
+        )
+    except EntraAccessDeniedError as exc:
+        if is_teams_popup:
+            return render(
+                request,
+                "requisitions/teams_auth_end.html",
+                {"auth_success": False, "error_message": exc.user_message},
+                status=403,
+            )
+        messages.error(request, exc.user_message)
+        return render(
+            request,
+            "requisitions/login.html",
+            {
+                "microsoft_auth_enabled": True,
+                "allow_local_login": bool(
+                    getattr(settings, "MICROSOFT_ALLOW_LOCAL_LOGIN", True)
+                ),
+                "next_url": "",
+            },
+            status=403,
+        )
+    except EntraAuthError as exc:
+        return _fail(exc.user_message)
+
+    login(
+        request,
+        sync_result.user,
+        backend="django.contrib.auth.backends.ModelBackend",
+    )
+    if is_teams_popup:
+        return redirect("teams-auth-end")
+
+    next_url = str(flow.get("next_url") or "")
+    if next_url and url_has_allowed_host_and_scheme(
+        next_url,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return redirect(next_url)
+    return redirect("dashboard")
+
+
+@require_GET
+def teams_tab_view(request):
+    """Entry point for Microsoft Teams personal and channel tabs."""
+    target = request.GET.get("target", "dashboard").strip().lower()
+    if target == "approval-queue":
+        destination_url = reverse("approval-queue")
+    else:
+        destination_url = reverse("dashboard")
+
+    if request.user.is_authenticated:
+        if target == "approval-queue" and can_access_approval_queue(request.user):
+            return redirect("approval-queue")
+        return redirect("dashboard")
+
+    return render(
+        request,
+        "requisitions/teams_tab.html",
+        {
+            "destination_url": destination_url,
+            "microsoft_auth_enabled": is_microsoft_auth_enabled(),
+        },
+    )
+
+
+@require_GET
+def teams_auth_start_view(request):
+    """Launch Entra ID OIDC login inside a Microsoft Teams authentication popup."""
+    if not is_microsoft_auth_enabled():
+        return render(
+            request,
+            "requisitions/teams_auth_end.html",
+            {
+                "auth_success": False,
+                "error_message": "Microsoft Entra ID SSO is not enabled.",
+            },
+            status=400,
+        )
+    login_hint = request.GET.get("loginHint", "").strip()
+    try:
+        authorize_url = build_authorization_request(
+            request,
+            teams_popup=True,
+            login_hint=login_hint,
+        )
+    except EntraAuthError as exc:
+        return render(
+            request,
+            "requisitions/teams_auth_end.html",
+            {"auth_success": False, "error_message": exc.user_message},
+            status=400,
+        )
+    return redirect(authorize_url)
+
+
+@require_GET
+def teams_auth_end_view(request):
+    """Complete the Microsoft Teams popup authentication handshake."""
+    return render(
+        request,
+        "requisitions/teams_auth_end.html",
+        {
+            "auth_success": bool(request.user.is_authenticated),
+            "error_message": ""
+            if request.user.is_authenticated
+            else "Authentication did not complete.",
+        },
+    )
 
 
 @login_required
@@ -975,9 +1276,18 @@ class LoginAPIView(APIView):
 
     def post(self, request):
         """Authenticate the supplied credentials and start a browser-compatible session."""
+        username = str(request.data.get("username", "")).strip()
+        if _login_is_throttled(request, username):
+            return Response(
+                {"detail": "Too many failed sign-in attempts. Please try again later."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
         serializer = LoginSerializer(data=request.data, context={"request": request})
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            _record_failed_login(request, username)
+            raise DRFValidationError(serializer.errors)
         user = serializer.validated_data["user"]
+        _clear_failed_logins(request, username)
         login(request, user)
         return Response(
             {

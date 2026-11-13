@@ -225,7 +225,7 @@ def transition_requisition(
             requisition.rejection_reason = comments.strip()
         requisition.save()
         # Keep the immutable event alongside the state change in the same transaction.
-        requisition.logs.create(
+        log_entry = requisition.logs.create(
             actor=actor,
             action=action,
             previous_status=previous_status,
@@ -245,6 +245,19 @@ def transition_requisition(
             enqueue_task(
                 "send_workflow_notification",
                 requisition_id=requisition.pk,
+                action=action,
+                previous_status=previous_status,
+                new_status=new_status,
+                actor_id=actor.pk,
+                comments=comments.strip(),
+            )
+        if getattr(settings, "MICROSOFT_NOTIFICATIONS_ENABLED", False):
+            from requisitions.tasks import enqueue_task
+
+            enqueue_task(
+                "send_microsoft_workflow_notification",
+                requisition_id=requisition.pk,
+                log_id=log_entry.pk,
                 action=action,
                 previous_status=previous_status,
                 new_status=new_status,

@@ -1,5 +1,6 @@
 """Project configuration, with local SQLite defaults and environment overrides."""
 
+import json
 import os
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -50,6 +51,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "requisitions.middleware.ForcePasswordChangeMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "requisitions.middleware.TeamsFrameAncestorsMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
@@ -255,6 +257,130 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGIN_URL = "login"
 LOGIN_REDIRECT_URL = "dashboard"
 LOGOUT_REDIRECT_URL = "login"
+
+
+def _parse_role_mapping(raw_value: str) -> dict:
+    """Parse MICROSOFT_ROLE_MAPPING from JSON or comma-separated group_id=ROLE pairs."""
+    cleaned = (raw_value or "").strip()
+    if not cleaned:
+        return {}
+    if cleaned.startswith("{"):
+        try:
+            parsed = json.loads(cleaned)
+        except ValueError as exc:
+            raise ImproperlyConfigured(
+                "MICROSOFT_ROLE_MAPPING contains invalid JSON."
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ImproperlyConfigured(
+                "MICROSOFT_ROLE_MAPPING JSON value must be an object."
+            )
+        return parsed
+    mapping = {}
+    for pair in cleaned.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ImproperlyConfigured(
+                f"Invalid MICROSOFT_ROLE_MAPPING entry '{pair}'. Expected JSON or group_id=ROLE."
+            )
+        key, value = pair.split("=", 1)
+        if key.strip() and value.strip():
+            mapping[key.strip()] = value.strip()
+    return mapping
+
+
+# Microsoft Entra ID (OIDC SSO), Microsoft Teams, and Microsoft 365 notification settings.
+MICROSOFT_AUTH_ENABLED = os.getenv("MICROSOFT_AUTH_ENABLED", "False").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+MICROSOFT_ALLOW_LOCAL_LOGIN = os.getenv("MICROSOFT_ALLOW_LOCAL_LOGIN", "True").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "").strip()
+MICROSOFT_ALLOWED_TENANTS = tuple(
+    t.strip()
+    for t in os.getenv("MICROSOFT_ALLOWED_TENANTS", "").split(",")
+    if t.strip()
+)
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
+MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
+MICROSOFT_REDIRECT_URI = os.getenv("MICROSOFT_REDIRECT_URI", "").strip()
+MICROSOFT_POST_LOGOUT_REDIRECT_URI = os.getenv(
+    "MICROSOFT_POST_LOGOUT_REDIRECT_URI", ""
+).strip()
+MICROSOFT_AUTHORITY_HOST = os.getenv(
+    "MICROSOFT_AUTHORITY_HOST", "https://login.microsoftonline.com"
+).strip()
+MICROSOFT_OIDC_SCOPES = tuple(
+    s.strip()
+    for s in os.getenv("MICROSOFT_OIDC_SCOPES", "openid,profile,email").split(",")
+    if s.strip()
+)
+MICROSOFT_AUTH_PROMPT = os.getenv("MICROSOFT_AUTH_PROMPT", "select_account").strip()
+MICROSOFT_ALLOWED_GROUPS = tuple(
+    g.strip()
+    for g in os.getenv("MICROSOFT_ALLOWED_GROUPS", "").split(",")
+    if g.strip()
+)
+MICROSOFT_AUTO_PROVISION_USERS = os.getenv(
+    "MICROSOFT_AUTO_PROVISION_USERS", "False"
+).lower() in {"1", "true", "yes"}
+MICROSOFT_LINK_EXISTING_BY_EMAIL = os.getenv(
+    "MICROSOFT_LINK_EXISTING_BY_EMAIL", "True"
+).lower() in {"1", "true", "yes"}
+MICROSOFT_ROLE_MAPPING = _parse_role_mapping(os.getenv("MICROSOFT_ROLE_MAPPING", ""))
+MICROSOFT_DEPARTMENT_CLAIM = os.getenv(
+    "MICROSOFT_DEPARTMENT_CLAIM", "department"
+).strip()
+MICROSOFT_UNMAPPED_USER_POLICY = (
+    os.getenv(
+        "MICROSOFT_UNMAPPED_USER_POLICY",
+        "keep_existing" if DEBUG else "deny",
+    )
+    .strip()
+    .lower()
+)
+MICROSOFT_STRICT_ROLE_SYNC = os.getenv(
+    "MICROSOFT_STRICT_ROLE_SYNC", "False" if DEBUG else "True"
+).lower() in {"1", "true", "yes"}
+MICROSOFT_GRAPH_GROUP_FALLBACK = os.getenv(
+    "MICROSOFT_GRAPH_GROUP_FALLBACK", "False"
+).lower() in {"1", "true", "yes"}
+MICROSOFT_HTTP_TIMEOUT = int(os.getenv("MICROSOFT_HTTP_TIMEOUT", "10"))
+MICROSOFT_TOKEN_CLOCK_SKEW_SECONDS = int(
+    os.getenv("MICROSOFT_TOKEN_CLOCK_SKEW_SECONDS", "60")
+)
+
+MICROSOFT_TEAMS_ENABLED = os.getenv("MICROSOFT_TEAMS_ENABLED", "False").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+MICROSOFT_TEAMS_APP_ID = os.getenv("MICROSOFT_TEAMS_APP_ID", "").strip()
+MICROSOFT_TEAMS_FRAME_ANCESTORS = os.getenv(
+    "MICROSOFT_TEAMS_FRAME_ANCESTORS",
+    "https://teams.microsoft.com https://*.teams.microsoft.com https://*.skype.com https://*.office.com",
+).strip()
+
+MICROSOFT_NOTIFICATIONS_ENABLED = os.getenv(
+    "MICROSOFT_NOTIFICATIONS_ENABLED", "False"
+).lower() in {"1", "true", "yes"}
+MICROSOFT_TEAMS_WEBHOOK_URL = os.getenv("MICROSOFT_TEAMS_WEBHOOK_URL", "").strip()
+
+SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
+
+# Brute-force protection for local username/password authentication endpoints.
+AUTH_RATE_LIMIT_ATTEMPTS = int(os.getenv("AUTH_RATE_LIMIT_ATTEMPTS", "5"))
+AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
+LOGIN_RATE_LIMIT = int(os.getenv("LOGIN_RATE_LIMIT", "10"))
+LOGIN_RATE_WINDOW_SECONDS = int(os.getenv("LOGIN_RATE_WINDOW_SECONDS", "300"))
 
 # Browser sessions support the UI; Basic auth is available to API clients.
 REST_FRAMEWORK = {

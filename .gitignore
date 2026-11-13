@@ -22,6 +22,9 @@ htmlcov/
 media/
 staticfiles/
 db.sqlite3
+sample_signatures/
+dist/
+teams/manifest.json
 
 # Editors and OS
 .vscode/

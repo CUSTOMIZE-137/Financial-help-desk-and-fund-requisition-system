@@ -58,6 +58,27 @@ class User(AbstractUser):
         verbose_name="Require password change on next sign-in",
         help_text="When enabled, the user must set a new password upon signing in before accessing the workspace.",
     )
+    entra_object_id = models.CharField(
+        max_length=64,
+        unique=True,
+        null=True,
+        blank=True,
+        db_index=True,
+        verbose_name="Entra Object ID",
+        help_text="Immutable Microsoft Entra ID object identifier (oid claim).",
+    )
+    entra_tenant_id = models.CharField(
+        max_length=64,
+        blank=True,
+        db_index=True,
+        verbose_name="Entra Tenant ID",
+        help_text="Microsoft Entra ID directory tenant identifier (tid claim).",
+    )
+    entra_last_sync_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Last Entra SSO Sync",
+    )
 
     @property
     def has_active_delegate(self) -> bool:
@@ -104,6 +125,10 @@ class User(AbstractUser):
             models.Index(
                 fields=["delegate", "is_active", "delegate_start_date", "delegate_end_date"],
                 name="user_active_delegate_idx",
+            ),
+            models.Index(
+                fields=["entra_tenant_id", "entra_object_id"],
+                name="user_entra_tid_oid_idx",
             ),
         ]
 

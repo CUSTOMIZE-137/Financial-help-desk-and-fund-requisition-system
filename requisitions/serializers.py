@@ -52,7 +52,11 @@ class UserSerializer(serializers.ModelSerializer):
             "delegate",
             "delegate_start_date",
             "delegate_end_date",
+            "entra_object_id",
+            "entra_tenant_id",
+            "entra_last_sync_at",
         ]
+        read_only_fields = ["entra_last_sync_at"]
 
     def validate_password(self, value):
         """Apply Django's configured password policy to API-created accounts."""

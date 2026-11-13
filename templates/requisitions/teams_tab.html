@@ -1,0 +1,66 @@
+{% extends "requisitions/base.html" %}
+{% load static %}
+{% block title %}Microsoft Teams · FinanceDesk{% endblock %}
+{% block header %}{% endblock %}
+{% block content %}
+<section class="auth-card" id="teams-tab-container" data-destination="{{ destination_url }}" data-auth-start="{% url 'teams-auth-start' %}">
+  <div class="auth-brand">
+    <img src="{% static 'images/organization-logo.png' %}" alt="">
+    <span>Finance<span>Desk</span></span>
+  </div>
+  <h1>FinanceDesk for Microsoft Teams</h1>
+  <p class="muted" id="teams-status-message">
+    Authenticate with your organization Microsoft 365 account to access your dashboard and approval queue.
+  </p>
+  <div style="display: grid; gap: 0.75rem; margin-top: 1.25rem;">
+    {% if microsoft_auth_enabled %}
+      <button id="teams-sso-btn" class="button primary full" type="button">
+        Sign in with Microsoft
+      </button>
+    {% endif %}
+    <a class="button secondary full" href="{% url 'login' %}?next={{ destination_url|urlencode }}">
+      Use standard sign-in page
+    </a>
+  </div>
+</section>
+<script src="https://res.cdn.office.net/teams-js/2.22.0/js/MicrosoftTeams.min.js" crossorigin="anonymous"></script>
+<script>
+(function () {
+  var container = document.getElementById("teams-tab-container");
+  var btn = document.getElementById("teams-sso-btn");
+  var statusEl = document.getElementById("teams-status-message");
+  if (!container || !btn) return;
+
+  var destinationUrl = container.getAttribute("data-destination") || "/";
+  var authStartUrl = window.location.origin + container.getAttribute("data-auth-start");
+
+  function launchAuth() {
+    if (window.microsoftTeams && window.microsoftTeams.app) {
+      window.microsoftTeams.app.initialize().then(function () {
+        window.microsoftTeams.app.getContext().then(function (context) {
+          var hint = (context && context.user && context.user.loginHint) ? context.user.loginHint : "";
+          var url = hint ? (authStartUrl + "?loginHint=" + encodeURIComponent(hint)) : authStartUrl;
+          window.microsoftTeams.authentication.authenticate({
+            url: url,
+            width: 600,
+            height: 535
+          }).then(function () {
+            window.location.replace(destinationUrl);
+          }).catch(function (reason) {
+            if (statusEl) {
+              statusEl.textContent = "Sign-in was not completed (" + (reason || "cancelled") + "). You can retry below.";
+            }
+          });
+        });
+      }).catch(function () {
+        window.location.href = "{% url 'microsoft-login' %}?next=" + encodeURIComponent(destinationUrl);
+      });
+    } else {
+      window.location.href = "{% url 'microsoft-login' %}?next=" + encodeURIComponent(destinationUrl);
+    }
+  }
+
+  btn.addEventListener("click", launchAuth);
+})();
+</script>
+{% endblock %}

@@ -75,8 +75,22 @@ Administrators can enroll staff accounts with cryptographically generated tempor
 - **Shared & S3-Compatible Object Storage**: Set `STORAGE_BACKEND=shared_fs` for multi-worker POSIX/NFS/EFS volumes or `STORAGE_BACKEND=s3` (with `AWS_STORAGE_BUCKET_NAME`, `AWS_S3_REGION_NAME`, `AWS_S3_ENDPOINT_URL`) for AWS S3, MinIO, Cloudflare R2, or DigitalOcean Spaces with private objects and presigned URLs.
 - **Query Optimization & Indexing**: Composite database indexes on `Requisition`, `RequisitionLog`, `User`, and `BackgroundTask`, single-query `aggregate()` dashboard counters, `select_related`/`prefetch_related` preloading, and `bulk_create` line-item persistence.
 - **Caching**: Redis cache support via `REDIS_URL` (falling back to `LocMemCache` locally) with signal-driven cache version invalidation for delegation lookups, dashboard counts, and generated requisition PDFs.
-- **Background Processing (`run_worker`)**: Durable `BackgroundTask` queue supporting `BACKGROUND_TASK_MODE=db_queue|thread|eager` for asynchronous enrollment invitations, workflow notifications, and PDF cache pre-warming with exponential backoff retries (`python manage.py run_worker`).
-- **Operational Infrastructure**: Liveness (`/healthz/`) and readiness (`/readyz/`) probes, structured logging, reverse-proxy TLS/HSTS headers, and multi-service `Dockerfile` + `docker-compose.yml` (`db`, `redis`, `web`, `worker`).
+- **Background Processing (`run_worker`)**: Durable `BackgroundTask` queue supporting `BACKGROUND_TASK_MODE=db_queue|thread|eager` for asynchronous enrollment invitations, requester + next-approver workflow notifications, Microsoft Teams Adaptive Card alerts, and PDF cache pre-warming with exponential backoff retries (`python manage.py run_worker`) and retention cleanup (`python manage.py prune_tasks --days 30`).
+- **Operational Infrastructure**: Liveness (`/healthz/`) and readiness (`/readyz/`) probes, structured logging, login brute-force rate limiting, reverse-proxy TLS/HSTS headers, and multi-service `Dockerfile` + `docker-compose.yml` (`db`, `redis`, `web`, `worker`).
+
+## Microsoft 365 Integration (Entra ID SSO, Role Sync & Teams App)
+
+FinanceDesk supports enterprise integration with Microsoft 365 while keeping Django as the authoritative system of record:
+
+- **Microsoft Entra ID Single Sign-On**: OIDC Authorization Code Flow with PKCE (`S256`), RS256 JWKS verification, strict tenant isolation, and immutable `(entra_tenant_id, entra_object_id)` linking (`/auth/microsoft/login/` and `/auth/microsoft/callback/`).
+- **Configurable Role & Department Mapping**: Maps Entra Security Group Object IDs (or App Roles) via `MICROSOFT_ROLE_MAPPING` to FinanceDesk roles (`ADMIN`, `EXECUTIVE_DIRECTOR`, `FINANCE`, `INTERNAL_AUDIT`, `PROGRAM_LEAD`, `ME_OFFICER`, `SUPERVISOR`, `EMPLOYEE`) with deterministic privilege precedence.
+- **Microsoft Teams Personal App**: Embeds the `Dashboard` and `Approval Queue` inside Microsoft Teams (`/teams/tab/`) protected by `TeamsFrameAncestorsMiddleware` (`Content-Security-Policy: frame-ancestors`). Generate a deployable Teams app `.zip` package with:
+  ```bash
+  python manage.py build_teams_package --app-id <TEAMS_APP_UUID> --client-id <ENTRA_CLIENT_UUID> --site-url https://financedesk.example.org
+  ```
+- **Asynchronous Teams Notifications**: Optional Adaptive Card webhook delivery via `BackgroundTask` (`MICROSOFT_NOTIFICATIONS_ENABLED=True` and `MICROSOFT_TEAMS_WEBHOOK_URL`).
+
+See [docs/MICROSOFT_365_INTEGRATION.md](docs/MICROSOFT_365_INTEGRATION.md) for complete setup, migration, and rollback instructions.
 
 ## Tests and checks
 
