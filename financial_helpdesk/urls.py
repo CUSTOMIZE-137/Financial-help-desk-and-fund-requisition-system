@@ -1,11 +1,21 @@
 """Top-level routes for the web interface, admin site, and REST API."""
 
+from django.conf import settings
 from django.contrib import admin
 from django.urls import include, path
+from django.views.generic.base import RedirectView
 
 from requisitions import views
 
 urlpatterns = [
+    path(
+        "favicon.ico",
+        RedirectView.as_view(
+            url="/" + settings.STATIC_URL.lstrip("/") + "images/favicon.ico",
+            permanent=False,
+        ),
+        name="favicon",
+    ),
     path("healthz/", views.healthz_view, name="healthz"),
     path("readyz/", views.readyz_view, name="readyz"),
     path("admin/", admin.site.urls),

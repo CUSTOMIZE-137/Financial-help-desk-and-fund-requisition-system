@@ -910,4 +910,18 @@ class RequisitionWorkflowTests(TestCase):
             storage.url("receipts/r1.pdf"),
         )
 
+    def test_ui_includes_resized_favicon_links_and_route(self):
+        """UI templates link the resized favicon assets and /favicon.ico redirects to static favicon."""
+        login_resp = self.client.get(reverse("login"))
+        self.assertEqual(login_resp.status_code, 200)
+        self.assertContains(login_resp, 'href="/static/images/favicon.ico"')
+        self.assertContains(login_resp, 'href="/static/images/favicon-32x32.png"')
+        self.assertContains(login_resp, 'href="/static/images/favicon-16x16.png"')
+        self.assertContains(login_resp, 'href="/static/images/apple-touch-icon.png"')
+
+        fav_resp = self.client.get(reverse("favicon"))
+        self.assertEqual(fav_resp.status_code, 302)
+        self.assertEqual(fav_resp["Location"], "/static/images/favicon.ico")
+
+
 

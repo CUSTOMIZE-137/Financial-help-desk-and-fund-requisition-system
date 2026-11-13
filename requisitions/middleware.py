@@ -32,6 +32,7 @@ class ForcePasswordChangeMiddleware:
         if user and user.is_authenticated and getattr(user, "must_change_password", False):
             # Allow only health probes, sign-in/sign-out routes, and the password reset endpoints.
             allowed_paths = {
+                reverse("favicon"),
                 reverse("healthz"),
                 reverse("readyz"),
                 reverse("password-change"),
