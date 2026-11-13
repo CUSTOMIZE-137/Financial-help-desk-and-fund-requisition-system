@@ -877,7 +877,8 @@ class RequisitionWorkflowTests(TestCase):
             BackgroundTask.objects.filter(status=BackgroundTask.STATUS_COMPLETED).count(),
             2,
         )
-        self.assertEqual(len(mail.outbox), 2)
+        # One enrollment invitation plus requester and approver workflow notifications.
+        self.assertEqual(len(mail.outbox), 3)
 
     def test_s3_compatible_storage_and_signed_redirect(self):
         """S3CompatibleStorage saves/reads objects and supports presigned URL redirects."""
