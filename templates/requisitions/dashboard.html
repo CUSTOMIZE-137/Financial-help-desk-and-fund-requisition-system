@@ -8,9 +8,15 @@
     <h1>Your workspace</h1>
     <p class="muted">Track fund requests through approval, disbursement, and closeout.</p>
   </div>
-  {% if request.user.role == "EMPLOYEE" or request.user.role == "ADMIN" or request.user.is_superuser %}
-    <a class="button primary" href="{% url 'requisition-create' %}">＋ New requisition</a>
-  {% endif %}
+  <div class="action-buttons" style="margin-top: 0;">
+    {% if request.user.role == "INTERNAL_AUDIT" %}<a class="button secondary" href="{% url 'internal-audit-report' %}">Generate audit report</a>{% endif %}
+    {% if request.user.role == "ADMIN" or request.user.is_superuser %}
+      <a class="button secondary" href="{% url 'user-enrollment' %}">Enroll users</a>
+    {% endif %}
+    {% if request.user.role == "EMPLOYEE" or request.user.role == "ADMIN" or request.user.is_superuser %}
+      <a class="button primary" href="{% url 'requisition-create' %}">＋ New requisition</a>
+    {% endif %}
+  </div>
 </div>
 <section class="stat-grid" aria-label="Requisition summary">
   <article class="stat-card"><span>Visible requests</span><strong>{{ counts.total }}</strong></article>
@@ -27,15 +33,16 @@
   {% if requisitions %}
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Request</th><th>Project</th><th>Amount</th><th>Status</th><th>Submitted</th></tr></thead>
+        <thead><tr><th>Request</th><th>Activity</th><th>Amount</th><th>Status</th><th>Submitted</th>{% if can_download_form %}<th>Filing</th>{% endif %}</tr></thead>
         <tbody>
         {% for item in requisitions %}
           <tr>
             <td><a class="table-link" href="{% url 'requisition-detail' item.pk %}">{{ item.title }}</a><small>{{ item.requestor.get_full_name|default:item.requestor.username }}</small></td>
-            <td>{{ item.project.name }}</td>
+            <td><span class="activity-pill {{ item.activity_type|lower }}">{{ item.get_activity_type_display }}</span></td>
             <td>{{ item.currency }} {{ item.amount|floatformat:2 }}</td>
             <td><span class="badge">{{ item.get_status_display }}</span></td>
             <td>{{ item.requested_at|date:"M j, Y" }}</td>
+            {% if can_download_form %}<td><a class="button secondary" href="{% url 'requisition-download' item.pk %}">Download form</a></td>{% endif %}
           </tr>
         {% endfor %}
         </tbody>

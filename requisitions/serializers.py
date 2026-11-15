@@ -1,27 +1,37 @@
 """DRF serializers for authentication and requisition-related resources."""
 
+from decimal import Decimal, ROUND_HALF_UP
+
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.validators import FileExtensionValidator
+from django.core.validators import FileExtensionValidator, MinValueValidator
 from django.urls import reverse
 from rest_framework import serializers
 
+from requisitions.enrollment import generate_temporary_password, send_enrollment_invitation
 from requisitions.models import (
     AccountabilitySubmission,
     Attachment,
-    BudgetLine,
-    Project,
     Requisition,
+    RequisitionItem,
     RequisitionLog,
     User,
+    validate_uploaded_evidence_file,
 )
+from requisitions.workflow import can_download_requisition_form
 
 
 class UserSerializer(serializers.ModelSerializer):
-    """Serialize staff accounts while accepting passwords only on creation."""
+    """Serialize staff accounts while supporting temporary credential generation and invitations."""
 
-    password = serializers.CharField(write_only=True, required=True, min_length=8)
+    password = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, min_length=8
+    )
+    send_invitation = serializers.BooleanField(
+        write_only=True, required=False, default=False
+    )
+    temporary_password = serializers.CharField(read_only=True)
 
     class Meta:
         """Expose account fields while keeping credentials write-only."""
@@ -34,6 +44,9 @@ class UserSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "password",
+            "temporary_password",
+            "must_change_password",
+            "send_invitation",
             "role",
             "department",
             "delegate",
@@ -43,6 +56,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     def validate_password(self, value):
         """Apply Django's configured password policy to API-created accounts."""
+        if not value:
+            return value
         try:
             validate_password(value)
         except DjangoValidationError as exc:
@@ -50,13 +65,57 @@ class UserSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        """Hash the submitted password instead of storing it as plain text."""
-        password = validated_data.pop("password")
+        """Hash the submitted or generated password and optionally send an enrollment email."""
+        password = validated_data.pop("password", "")
+        send_invitation = validated_data.pop("send_invitation", False)
+        explicit_must_change = "must_change_password" in validated_data
         user = User(**validated_data)
+
+        generated_temp = False
+        if not password:
+            password = generate_temporary_password(user=user)
+            generated_temp = True
+            if not explicit_must_change:
+                user.must_change_password = True
+
         user.set_password(password)
         user.full_clean()
         user.save()
+
+        if generated_temp or user.must_change_password:
+            user.temporary_password = password
+        if send_invitation and user.email:
+            send_enrollment_invitation(
+                user, password, request=self.context.get("request")
+            )
         return user
+
+
+class PasswordChangeSerializer(serializers.Serializer):
+    """Validate and apply a password change for an authenticated user."""
+
+    old_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate_old_password(self, value):
+        user = self.context["request"].user
+        if not user.check_password(value):
+            raise serializers.ValidationError("Your current password was entered incorrectly.")
+        return value
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        old_password = attrs.get("old_password")
+        new_password = attrs.get("new_password")
+        if old_password == new_password:
+            raise serializers.ValidationError(
+                {"new_password": "Your new password must be different from your temporary password."}
+            )
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"new_password": list(exc.messages)}) from exc
+        return attrs
 
 
 class LoginSerializer(serializers.Serializer):
@@ -78,59 +137,25 @@ class LoginSerializer(serializers.Serializer):
         return attrs
 
 
-class ProjectSerializer(serializers.ModelSerializer):
-    """Expose project details and validate model-level date constraints."""
-
-    class Meta:
-        """List project fields accepted by the API."""
-
-        model = Project
-        fields = ["id", "code", "name", "description", "start_date", "end_date", "is_active"]
-
-    def validate(self, attrs):
-        """Run model validation against the complete instance values."""
-        instance = self.instance or Project()
-        for field, value in attrs.items():
-            setattr(instance, field, value)
-        try:
-            instance.full_clean()
-        except DjangoValidationError as exc:
-            raise serializers.ValidationError(exc.message_dict) from exc
-        return attrs
 
 
-class BudgetLineSerializer(serializers.ModelSerializer):
-    """Expose budget totals and validate allocation constraints."""
+class RequisitionItemSerializer(serializers.ModelSerializer):
+    """Serialize individual budget line items."""
 
-    available_amount = serializers.DecimalField(
+    quantity = serializers.DecimalField(
+        max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))]
+    )
+    unit_cost = serializers.DecimalField(
+        max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.00"))]
+    )
+    total_cost = serializers.DecimalField(
         max_digits=14, decimal_places=2, read_only=True
     )
 
     class Meta:
-        """Expose budget values and the computed read-only balance."""
-
-        model = BudgetLine
-        fields = [
-            "id",
-            "project",
-            "code",
-            "category",
-            "allocated_amount",
-            "spent_amount",
-            "available_amount",
-            "currency",
-        ]
-
-    def validate(self, attrs):
-        """Run model validation after applying submitted field changes."""
-        instance = self.instance or BudgetLine()
-        for field, value in attrs.items():
-            setattr(instance, field, value)
-        try:
-            instance.full_clean()
-        except DjangoValidationError as exc:
-            raise serializers.ValidationError(exc.message_dict) from exc
-        return attrs
+        model = RequisitionItem
+        fields = ["id", "item_description", "quantity", "unit_cost", "total_cost"]
+        read_only_fields = ["id", "total_cost"]
 
 
 class RequisitionSerializer(serializers.ModelSerializer):
@@ -138,8 +163,15 @@ class RequisitionSerializer(serializers.ModelSerializer):
 
     requestor = serializers.PrimaryKeyRelatedField(read_only=True)
     status = serializers.CharField(read_only=True)
-    project_name = serializers.CharField(source="project.name", read_only=True)
-    budget_line_code = serializers.CharField(source="budget_line.code", read_only=True)
+    activity_display = serializers.CharField(source="get_activity_type_display", read_only=True)
+    amount = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        required=False,
+        validators=[MinValueValidator(Decimal("0.01"))],
+    )
+    items = RequisitionItemSerializer(many=True, required=False)
+    form_download_url = serializers.SerializerMethodField()
 
     class Meta:
         """Keep ownership and workflow-controlled fields read-only."""
@@ -148,32 +180,129 @@ class RequisitionSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "requestor",
-            "project",
-            "project_name",
-            "budget_line",
-            "budget_line_code",
+            "activity_type",
+            "activity_display",
             "title",
             "description",
             "amount",
             "currency",
+            "voucher_number",
+            "disbursement_method",
             "status",
             "department",
             "requested_at",
             "due_date",
+            "activity_date",
+            "team_lead",
+            "impact",
+            "program",
+            "indicator",
+            "activity_overview",
+            "expected_outcomes",
+            "expected_outputs",
+            "target_number",
+            "inputs",
+            "other_staff",
+            "risk_assessment",
+            "reporting_strategy",
+            "items",
             "last_comment",
+            "form_download_url",
         ]
-        read_only_fields = ["id", "requestor", "status", "department", "requested_at"]
+        read_only_fields = [
+            "id",
+            "requestor",
+            "status",
+            "department",
+            "requested_at",
+            "voucher_number",
+            "disbursement_method",
+            "form_download_url",
+        ]
+
+    def get_form_download_url(self, obj):
+        """Return a PDF form download link when the current user is in Finance or Admin."""
+        request = self.context.get("request")
+        if not request or not can_download_requisition_form(request.user, obj):
+            return None
+        path = reverse("api-requisition-download", kwargs={"pk": obj.pk})
+        return request.build_absolute_uri(path)
 
     def validate(self, attrs):
         """Check model constraints against the instance plus incoming values."""
+        items_data = attrs.get("items")
+        if items_data is not None:
+            if not items_data:
+                raise serializers.ValidationError(
+                    {"items": "Add at least one item to the budget."}
+                )
+            computed_total = sum(
+                (
+                    (item["quantity"] * item["unit_cost"]).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                    for item in items_data
+                ),
+                Decimal("0.00"),
+            )
+            if computed_total <= Decimal("0.00"):
+                raise serializers.ValidationError(
+                    {"amount": "The total budget must be greater than zero."}
+                )
+            attrs["amount"] = computed_total
+        elif self.instance is None and "amount" not in attrs:
+            raise serializers.ValidationError(
+                {"amount": "Provide a budget amount or at least one budget line item."}
+            )
+
         instance = self.instance or Requisition(requestor=self.context["request"].user)
         for field, value in attrs.items():
+            if field == "items":
+                continue
             setattr(instance, field, value)
         try:
             instance.full_clean(exclude=["status", "requested_at", "updated_at"])
         except DjangoValidationError as exc:
             raise serializers.ValidationError(exc.message_dict) from exc
         return attrs
+
+    def _save_items(self, requisition, items_data):
+        """Replace line items in bulk and recalculate each row's total cost."""
+        requisition.items.all().delete()
+        rows = []
+        for item in items_data:
+            qty = item["quantity"]
+            unit_cost = item["unit_cost"]
+            total_cost = (qty * unit_cost).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            rows.append(
+                RequisitionItem(
+                    requisition=requisition,
+                    item_description=item["item_description"].strip(),
+                    quantity=qty,
+                    unit_cost=unit_cost,
+                    total_cost=total_cost,
+                )
+            )
+        if rows:
+            RequisitionItem.objects.bulk_create(rows)
+
+    def create(self, validated_data):
+        """Create the requisition and any supplied budget line items."""
+        items_data = validated_data.pop("items", None)
+        requisition = super().create(validated_data)
+        if items_data is not None:
+            self._save_items(requisition, items_data)
+        return requisition
+
+    def update(self, instance, validated_data):
+        """Update the requisition and replace budget line items if supplied."""
+        items_data = validated_data.pop("items", None)
+        requisition = super().update(instance, validated_data)
+        if items_data is not None:
+            self._save_items(requisition, items_data)
+        return requisition
 
 
 class RequisitionLogSerializer(serializers.ModelSerializer):
@@ -229,16 +358,20 @@ class AccountabilitySubmissionSerializer(serializers.ModelSerializer):
             "invoice_file",
             "receipt_download_url",
             "invoice_download_url",
+            "unspent_amount",
             "submitted_at",
             "finance_approved_at",
+            "audit_approved_at",
         ]
         read_only_fields = [
             "id",
             "receipt_download_url",
             "invoice_download_url",
+            "unspent_amount",
             "submitted_by",
             "submitted_at",
             "finance_approved_at",
+            "audit_approved_at",
         ]
 
     def validate(self, attrs):
@@ -260,15 +393,19 @@ class AccountabilitySubmissionSerializer(serializers.ModelSerializer):
         return attrs
 
     def validate_receipt_file(self, file):
-        """Reject receipt uploads over the configured per-file size limit."""
-        if file.size > 15 * 1024 * 1024:
-            raise serializers.ValidationError("Files must be 15 MB or smaller.")
+        """Reject receipt uploads that exceed the size limit or fail content signature checks."""
+        try:
+            validate_uploaded_evidence_file(file)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages) from exc
         return file
 
     def validate_invoice_file(self, file):
-        """Reject invoice uploads over the configured per-file size limit."""
-        if file.size > 15 * 1024 * 1024:
-            raise serializers.ValidationError("Files must be 15 MB or smaller.")
+        """Reject invoice uploads that exceed the size limit or fail content signature checks."""
+        try:
+            validate_uploaded_evidence_file(file)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages) from exc
         return file
 
     def get_receipt_download_url(self, obj):
@@ -322,9 +459,11 @@ class AttachmentSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(path) if request else path
 
     def validate_file(self, file):
-        """Reject attachment uploads over the configured per-file size limit."""
-        if file.size > 15 * 1024 * 1024:
-            raise serializers.ValidationError("Files must be 15 MB or smaller.")
+        """Reject attachment uploads that exceed the size limit or fail content signature checks."""
+        try:
+            validate_uploaded_evidence_file(file)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages) from exc
         return file
 
 
@@ -333,3 +472,9 @@ class RequisitionActionSerializer(serializers.Serializer):
 
     action = serializers.ChoiceField(choices=RequisitionLog.ACTION_CHOICES)
     comments = serializers.CharField(required=False, allow_blank=True, max_length=5000)
+    disbursement_method = serializers.ChoiceField(
+        choices=Requisition.DISBURSEMENT_METHOD_CHOICES,
+        required=False,
+        allow_blank=True,
+    )
+

@@ -14,5 +14,10 @@ urlpatterns = [
         views.accountability_create_view,
         name="accountability-create",
     ),
+    path(
+        "<int:pk>/download/",
+        views.requisition_download_view,
+        name="requisition-download",
+    ),
     path("files/<str:kind>/<int:pk>/", views.protected_file_view, name="protected-file"),
 ]

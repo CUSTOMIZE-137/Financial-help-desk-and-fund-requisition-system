@@ -1,18 +1,188 @@
 {% extends "requisitions/base.html" %}
+{% load static %}
 {% block title %}{% if is_edit %}Edit{% else %}New{% endif %} requisition · FinanceDesk{% endblock %}
 {% block content %}
-<!-- The same form supports new drafts and owner edits after a revision request. -->
-<div class="narrow">
+<div class="activity-form-page">
   <a class="back-link" href="{% if requisition %}{% url 'requisition-detail' requisition.pk %}{% else %}{% url 'dashboard' %}{% endif %}">← Back</a>
-  <p class="eyebrow">FUND REQUEST</p>
-  <h1>{% if is_edit %}Update requisition{% else %}Create a requisition{% endif %}</h1>
-  <p class="muted">Provide a clear purpose, project, budget line, and itemized request amount.</p>
-  <section class="panel form-panel">
-    <form method="post">
+  <section class="activity-sheet" aria-label="Activity plan and fund requisition">
+    <form method="post" id="requisition-form" novalidate>
       {% csrf_token %}
-      {{ form.as_p }}
-      <div class="form-actions"><a class="button secondary" href="{% url 'dashboard' %}">Cancel</a><button class="button primary" type="submit">Save draft</button></div>
+      {% for hidden in form.hidden_fields %}{{ hidden }}{% endfor %}
+      {% if form.non_field_errors %}<div class="form-errors" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+
+      <div class="activity-table">
+        <div class="activity-row activity-choice-row">
+          <label for="{{ form.activity_type.id_for_label }}">Activity</label>
+          <div class="activity-value">
+            {{ form.activity_type }}
+            {{ form.activity_type.errors }}
+          </div>
+        </div>
+        <div class="activity-row">
+          <label for="{{ form.title.id_for_label }}">Activity title</label>
+          <div class="activity-value">{{ form.title }}{{ form.title.errors }}</div>
+        </div>
+        <div class="activity-row activity-description-row">
+          <label for="{{ form.description.id_for_label }}">Description</label>
+          <div class="activity-value">{{ form.description }}{{ form.description.errors }}</div>
+        </div>
+
+        <div id="program-activity-fields" class="program-activity-fields"{% if form.is_bound and form.data.activity_type == 'ADMINISTRATIVE' %} hidden{% endif %}>
+          <div class="activity-row">
+            <label for="{{ form.activity_date.id_for_label }}">Date of the activity</label>
+            <div class="activity-value">{{ form.activity_date }}{{ form.activity_date.errors }}</div>
+          </div>
+          <div class="activity-row">
+            <label for="{{ form.team_lead.id_for_label }}">Team lead</label>
+            <div class="activity-value">{{ form.team_lead }}{{ form.team_lead.errors }}</div>
+          </div>
+          <div class="activity-row activity-tall-row">
+            <label for="{{ form.impact.id_for_label }}">Impact</label>
+            <div class="activity-value">{{ form.impact }}{{ form.impact.errors }}</div>
+          </div>
+          <div class="activity-row">
+            <label for="{{ form.program.id_for_label }}">Program</label>
+            <div class="activity-value">{{ form.program }}{{ form.program.errors }}</div>
+          </div>
+          <div class="activity-row activity-tall-row indicator-row">
+            <label for="{{ form.indicator.id_for_label }}">Indicator</label>
+            <div class="activity-value">{{ form.indicator }}{{ form.indicator.errors }}</div>
+          </div>
+          <div class="activity-row activity-tall-row">
+            <label for="{{ form.activity_overview.id_for_label }}">Overview of the activity</label>
+            <div class="activity-value">{{ form.activity_overview }}{{ form.activity_overview.errors }}</div>
+          </div>
+          <div class="activity-row activity-tall-row">
+            <label for="{{ form.expected_outcomes.id_for_label }}">Expected outcomes</label>
+            <div class="activity-value">{{ form.expected_outcomes }}{{ form.expected_outcomes.errors }}</div>
+          </div>
+          <div class="activity-row">
+            <label for="{{ form.expected_outputs.id_for_label }}">Expected outputs</label>
+            <div class="activity-value">{{ form.expected_outputs }}{{ form.expected_outputs.errors }}</div>
+          </div>
+          <div class="activity-row">
+            <label for="{{ form.target_number.id_for_label }}">Target number</label>
+            <div class="activity-value">{{ form.target_number }}{{ form.target_number.errors }}</div>
+          </div>
+          <div class="activity-row activity-tall-row">
+            <label for="{{ form.inputs.id_for_label }}">Inputs</label>
+            <div class="activity-value">{{ form.inputs }}{{ form.inputs.errors }}</div>
+          </div>
+          <div class="activity-row activity-tall-row">
+            <label for="{{ form.other_staff.id_for_label }}">Other staff involved in the activity</label>
+            <div class="activity-value">{{ form.other_staff }}{{ form.other_staff.errors }}</div>
+          </div>
+          <div class="activity-row activity-tall-row">
+            <label for="{{ form.risk_assessment.id_for_label }}">Risk assessment and mitigation plan</label>
+            <div class="activity-value">{{ form.risk_assessment }}{{ form.risk_assessment.errors }}</div>
+          </div>
+          <div class="activity-row activity-tall-row">
+            <label for="{{ form.reporting_strategy.id_for_label }}">Reporting strategy</label>
+            <div class="activity-value">{{ form.reporting_strategy }}{{ form.reporting_strategy.errors }}</div>
+          </div>
+        </div>
+
+        <section class="budget-section" aria-labelledby="budget-title">
+          <div class="budget-section-heading">
+            <h2 id="budget-title">Budget</h2>
+            <span>All amounts in UGX</span>
+          </div>
+          <div class="budget-table-wrap">
+            <table class="budget-editor">
+              <thead>
+                <tr><th scope="col">Item</th><th scope="col">Qty</th><th scope="col">Unit cost</th><th scope="col">Total cost (UGX)</th><th scope="col"><span class="visually-hidden">Row controls</span></th></tr>
+              </thead>
+              <tbody id="budget-rows">
+                {% for row in budget_rows %}
+                  <tr class="budget-row">
+                    <td><input name="item_description[]" value="{{ row.description }}" aria-label="Budget item {{ forloop.counter }}"></td>
+                    <td><input name="quantity[]" type="number" min="0.01" step="0.01" value="{{ row.quantity }}" aria-label="Quantity for budget item {{ forloop.counter }}"></td>
+                    <td><input name="unit_cost[]" type="number" min="0" step="0.01" value="{{ row.unit_cost }}" aria-label="Unit cost for budget item {{ forloop.counter }}"></td>
+                    <td><input name="total_cost[]" type="text" value="{{ row.total_cost }}" aria-label="Total cost for budget item {{ forloop.counter }}" readonly></td>
+                    <td><button class="remove-budget-row" type="button" aria-label="Remove budget item {{ forloop.counter }}" title="Remove item">×</button></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <th colspan="3" scope="row">Total budget</th>
+                  <td id="budget-total" colspan="2">UGX {{ requisition.amount|default:"0.00" }}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          <div class="budget-controls">
+            <button class="button secondary" type="button" id="add-budget-row">Add item</button>
+          </div>
+        </section>
+      </div>
+
+      <template id="budget-row-template">
+        <tr class="budget-row">
+          <td><input name="item_description[]" aria-label="Budget item"></td>
+          <td><input name="quantity[]" type="number" min="0.01" step="0.01" value="1" aria-label="Quantity"></td>
+          <td><input name="unit_cost[]" type="number" min="0" step="0.01" aria-label="Unit cost"></td>
+          <td><input name="total_cost[]" type="text" aria-label="Total cost" readonly></td>
+          <td><button class="remove-budget-row" type="button" aria-label="Remove budget item" title="Remove item">×</button></td>
+        </tr>
+      </template>
+
+      <div class="form-actions">
+        <a class="button secondary" href="{% url 'dashboard' %}">Cancel</a>
+        <button class="button secondary" type="submit" name="action_type" value="draft">Save draft</button>
+        <button class="button primary" type="submit" name="action_type" value="submit">Submit for approval</button>
+      </div>
     </form>
   </section>
 </div>
+<script>
+  (() => {
+    const activitySelect = document.getElementById("id_activity_type");
+    const programFields = document.getElementById("program-activity-fields");
+    const indicatorField = document.getElementById("id_indicator");
+    const rows = document.getElementById("budget-rows");
+    const rowTemplate = document.getElementById("budget-row-template");
+    const totalDisplay = document.getElementById("budget-total");
+    const amountField = document.getElementById("id_amount");
+
+    const setActivityFields = () => {
+      const isAdministrative = activitySelect.value === "ADMINISTRATIVE";
+      programFields.hidden = isAdministrative;
+      programFields.querySelectorAll("input, select, textarea").forEach((field) => {
+        field.disabled = isAdministrative;
+      });
+      indicatorField.required = !isAdministrative;
+      indicatorField.setAttribute("aria-required", String(!isAdministrative));
+    };
+
+    const recalculateBudget = () => {
+      let total = 0;
+      rows.querySelectorAll(".budget-row").forEach((row) => {
+        const quantity = Number(row.querySelector('[name="quantity[]"]').value || 0);
+        const unitCost = Number(row.querySelector('[name="unit_cost[]"]').value || 0);
+        const lineTotal = Math.round((quantity * unitCost + Number.EPSILON) * 100) / 100;
+        row.querySelector('[name="total_cost[]"]').value = lineTotal.toFixed(2);
+        total += lineTotal;
+      });
+      amountField.value = total.toFixed(2);
+      totalDisplay.textContent = `UGX ${total.toLocaleString("en-UG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    };
+
+    activitySelect.addEventListener("change", setActivityFields);
+    document.getElementById("add-budget-row").addEventListener("click", () => {
+      rows.append(rowTemplate.content.cloneNode(true));
+      recalculateBudget();
+    });
+    rows.addEventListener("input", recalculateBudget);
+    rows.addEventListener("click", (event) => {
+      const removeButton = event.target.closest(".remove-budget-row");
+      if (!removeButton) return;
+      removeButton.closest(".budget-row").remove();
+      recalculateBudget();
+    });
+
+    setActivityFields();
+    recalculateBudget();
+  })();
+</script>
 {% endblock %}

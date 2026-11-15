@@ -1,14 +1,15 @@
 """Django admin configuration for finance setup and audit review."""
 
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
+from requisitions.enrollment import issue_temporary_credentials
 from requisitions.models import (
     AccountabilitySubmission,
     Attachment,
-    BudgetLine,
-    Project,
+    BackgroundTask,
     Requisition,
+    RequisitionItem,
     RequisitionLog,
     User,
 )
@@ -16,7 +17,7 @@ from requisitions.models import (
 
 @admin.register(User)
 class UserAdmin(DjangoUserAdmin):
-    """Include workflow roles and delegation settings on user admin pages."""
+    """Include workflow roles, enrollment settings, and delegation on user admin pages."""
 
     fieldsets = DjangoUserAdmin.fieldsets + (
         (
@@ -25,6 +26,8 @@ class UserAdmin(DjangoUserAdmin):
                 "fields": (
                     "role",
                     "department",
+                    "must_change_password",
+                    "signature_image",
                     "delegate",
                     "delegate_start_date",
                     "delegate_end_date",
@@ -32,33 +35,53 @@ class UserAdmin(DjangoUserAdmin):
             },
         ),
     )
-    list_display = ("username", "email", "role", "department", "is_active")
-    list_filter = ("role", "department", "is_active")
-
-
-@admin.register(Project)
-class ProjectAdmin(admin.ModelAdmin):
-    """Provide searchable project setup in the administration site."""
-
-    list_display = ("code", "name", "is_active", "start_date", "end_date")
-    list_filter = ("is_active",)
-    search_fields = ("code", "name")
-
-
-@admin.register(BudgetLine)
-class BudgetLineAdmin(admin.ModelAdmin):
-    """Show project allocations and recorded spending for finance staff."""
-
-    list_display = (
-        "code",
-        "category",
-        "project",
-        "allocated_amount",
-        "spent_amount",
-        "currency",
+    add_fieldsets = DjangoUserAdmin.add_fieldsets + (
+        (
+            "Help desk access",
+            {
+                "fields": (
+                    "role",
+                    "department",
+                    "must_change_password",
+                    "signature_image",
+                )
+            },
+        ),
     )
-    list_filter = ("project", "currency")
-    search_fields = ("code", "category", "project__name")
+    list_display = (
+        "username",
+        "email",
+        "role",
+        "department",
+        "must_change_password",
+        "is_active",
+    )
+    list_filter = ("role", "department", "must_change_password", "is_active")
+    actions = ["reissue_temporary_credentials_and_invite"]
+
+    @admin.action(description="Generate temporary password & send invitation email")
+    def reissue_temporary_credentials_and_invite(self, request, queryset):
+        """Generate temporary passwords, require first-login reset, and email selected users."""
+        summaries = []
+        for user in queryset:
+            result = issue_temporary_credentials(user, send_invite=True, request=request)
+            invite_status = "email sent" if result.email_sent else "no email sent"
+            summaries.append(
+                f"{user.username} (temp password: {result.temporary_password}, {invite_status})"
+            )
+        if summaries:
+            self.message_user(
+                request,
+                "Temporary credentials issued: " + "; ".join(summaries),
+                level=messages.SUCCESS,
+            )
+
+
+class RequisitionItemInline(admin.TabularInline):
+    """Display itemized budget breakdown on a requisition."""
+
+    model = RequisitionItem
+    extra = 1
 
 
 class RequisitionLogInline(admin.TabularInline):
@@ -80,17 +103,27 @@ class RequisitionAdmin(admin.ModelAdmin):
 
     list_display = (
         "title",
+        "activity_type",
         "requestor",
-        "project",
         "amount",
         "currency",
+        "voucher_number",
+        "disbursement_method",
         "status",
         "requested_at",
     )
-    list_filter = ("status", "project", "department")
-    search_fields = ("title", "requestor__username", "project__name")
-    readonly_fields = ("status", "requested_at", "updated_at", "approved_at", "disbursed_at")
-    inlines = [RequisitionLogInline]
+    list_filter = ("status", "activity_type", "department")
+    search_fields = ("title", "requestor__username", "team_lead", "program")
+    readonly_fields = (
+        "status",
+        "requested_at",
+        "updated_at",
+        "approved_at",
+        "disbursed_at",
+        "voucher_number",
+        "disbursement_method",
+    )
+    inlines = [RequisitionItemInline, RequisitionLogInline]
 
     def get_readonly_fields(self, request, obj=None):
         """Freeze all request fields once approval or processing has started."""
@@ -114,8 +147,9 @@ class AccountabilitySubmissionAdmin(admin.ModelAdmin):
         "requisition",
         "submitted_by",
         "actual_amount_spent",
+            "unspent_amount",
         "submitted_at",
-        "finance_approved_at",
+        "audit_approved_at",
     )
     readonly_fields = [field.name for field in AccountabilitySubmission._meta.fields]
 
@@ -150,3 +184,31 @@ class AttachmentAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         """Preserve supporting evidence after it has been uploaded."""
         return False
+
+
+@admin.register(BackgroundTask)
+class BackgroundTaskAdmin(admin.ModelAdmin):
+    """Operational view for monitoring and retrying background jobs."""
+
+    list_display = (
+        "id",
+        "task_name",
+        "status",
+        "attempts",
+        "max_attempts",
+        "scheduled_at",
+        "completed_at",
+    )
+    list_filter = ("status", "task_name")
+    readonly_fields = [field.name for field in BackgroundTask._meta.fields]
+    actions = ["requeue_failed_tasks"]
+
+    @admin.action(description="Re-queue selected tasks for worker execution")
+    def requeue_failed_tasks(self, request, queryset):
+        updated = queryset.update(status=BackgroundTask.STATUS_PENDING, attempts=0, last_error="")
+        self.message_user(
+            request,
+            f"Re-queued {updated} background task(s).",
+            level=messages.SUCCESS,
+        )
+

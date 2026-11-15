@@ -8,21 +8,17 @@ urlpatterns = [
     path("auth/login/", views.LoginAPIView.as_view(), name="api-login"),
     path("auth/logout/", views.LogoutAPIView.as_view(), name="api-logout"),
     path(
+        "auth/password-change/",
+        views.PasswordChangeAPIView.as_view(),
+        name="api-password-change",
+    ),
+    path(
         "files/<str:kind>/<int:pk>/",
         views.ProtectedFileAPIView.as_view(),
         name="api-protected-file",
     ),
     path("users/", views.UserListCreateView.as_view(), name="user-list-create"),
-    path(
-        "projects/",
-        views.ProjectListCreateView.as_view(),
-        name="project-list-create",
-    ),
-    path(
-        "budget-lines/",
-        views.BudgetLineListCreateView.as_view(),
-        name="budget-line-list-create",
-    ),
+
     path(
         "requisitions/",
         views.RequisitionListCreateView.as_view(),
@@ -37,6 +33,11 @@ urlpatterns = [
         "requisitions/<int:pk>/transition/",
         views.RequisitionActionView.as_view(),
         name="requisition-transition",
+    ),
+    path(
+        "requisitions/<int:pk>/download/",
+        views.RequisitionDownloadAPIView.as_view(),
+        name="api-requisition-download",
     ),
     path(
         "requisition-logs/",

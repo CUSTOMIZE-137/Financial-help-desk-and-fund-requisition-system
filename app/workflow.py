@@ -11,22 +11,16 @@ ROLE_PERMISSIONS = {
     "EMPLOYEE": ("SUBMIT", "RESUBMIT", "SUBMIT_ACCOUNTABILITY"),
     "SUPERVISOR": ("APPROVE", "REQUEST_REVISION", "REJECT"),
     "ME_OFFICER": ("APPROVE", "REQUEST_REVISION", "REJECT"),
-    "PROGRAM_DIRECTOR": ("APPROVE", "REQUEST_REVISION", "REJECT"),
+    "PROGRAM_LEAD": ("APPROVE", "REQUEST_REVISION", "REJECT"),
+    "EXECUTIVE_DIRECTOR": ("APPROVE", "REQUEST_REVISION", "REJECT"),
     "FINANCE": (
         "APPROVE",
         "REQUEST_REVISION",
         "REJECT",
-        "SUBMIT_ACCOUNTABILITY",
-        "FINALIZE_ACCOUNTABILITY",
     ),
-    "ADMIN": (
-        "SUBMIT",
-        "APPROVE",
-        "REQUEST_REVISION",
-        "REJECT",
-        "RESUBMIT",
-        "SUBMIT_ACCOUNTABILITY",
+    "INTERNAL_AUDIT": (
         "FINALIZE_ACCOUNTABILITY",
+        "REQUEST_REVISION",
     ),
 }
 
@@ -41,11 +35,16 @@ STATUS_FLOW = {
         "REJECT": "REJECTED",
     },
     "PENDING_ME": {
-        "APPROVE": "PENDING_DIRECTOR",
+        "APPROVE": "PENDING_PROGRAM_LEAD",
         "REQUEST_REVISION": "REVISION_REQUESTED",
         "REJECT": "REJECTED",
     },
-    "PENDING_DIRECTOR": {
+    "PENDING_PROGRAM_LEAD": {
+        "APPROVE": "PENDING_EXECUTIVE_DIRECTOR",
+        "REQUEST_REVISION": "REVISION_REQUESTED",
+        "REJECT": "REJECTED",
+    },
+    "PENDING_EXECUTIVE_DIRECTOR": {
         "APPROVE": "PENDING_FINANCE",
         "REQUEST_REVISION": "REVISION_REQUESTED",
         "REJECT": "REJECTED",
@@ -57,7 +56,10 @@ STATUS_FLOW = {
     },
     "REVISION_REQUESTED": {"RESUBMIT": REVIEW_START_STATUS},
     "DISBURSED": {"SUBMIT_ACCOUNTABILITY": "AWAITING_ACCOUNTABILITY"},
-    "AWAITING_ACCOUNTABILITY": {"FINALIZE_ACCOUNTABILITY": "COMPLETED"},
+    "AWAITING_ACCOUNTABILITY": {
+        "FINALIZE_ACCOUNTABILITY": "COMPLETED",
+        "REQUEST_REVISION": "DISBURSED",
+    },
     "REJECTED": {},
     "COMPLETED": {},
 }
@@ -65,8 +67,10 @@ STATUS_FLOW = {
 ROLE_STAGE_MAP = {
     "SUPERVISOR": "PENDING_SUPERVISOR",
     "ME_OFFICER": "PENDING_ME",
-    "PROGRAM_DIRECTOR": "PENDING_DIRECTOR",
+    "PROGRAM_LEAD": "PENDING_PROGRAM_LEAD",
+    "EXECUTIVE_DIRECTOR": "PENDING_EXECUTIVE_DIRECTOR",
     "FINANCE": "PENDING_FINANCE",
+    "INTERNAL_AUDIT": "AWAITING_ACCOUNTABILITY",
 }
 
 # Derive these sets from the workflow definition to keep validation in sync.
@@ -98,12 +102,22 @@ def normalize_role(value: str) -> str:
         "ME_OFFICER": "ME_OFFICER",
         "M_E_OFFICER": "ME_OFFICER",
         "MEOFFICER": "ME_OFFICER",
-        "PROGRAM_DIRECTOR": "PROGRAM_DIRECTOR",
-        "PROGRAMDIRECTOR": "PROGRAM_DIRECTOR",
-        "PROGRAM_DIRECTOR_": "PROGRAM_DIRECTOR",
+        "PROGRAM_LEAD": "PROGRAM_LEAD",
+        "PROGRAMLEAD": "PROGRAM_LEAD",
+        "PROGRAM_LEADER": "PROGRAM_LEAD",
+        "PROGRAM_DIRECTOR": "PROGRAM_LEAD",
+        "PROGRAMDIRECTOR": "PROGRAM_LEAD",
+        "PROGRAM_DIRECTOR_": "PROGRAM_LEAD",
+        "EXECUTIVE_DIRECTOR": "EXECUTIVE_DIRECTOR",
+        "EXECUTIVEDIRECTOR": "EXECUTIVE_DIRECTOR",
+        "EXECUTIVE_DIRECTOR_": "EXECUTIVE_DIRECTOR",
+        "ED": "EXECUTIVE_DIRECTOR",
         "FINANCE": "FINANCE",
         "FINANCE_OFFICER": "FINANCE",
         "FINANCEOFFICER": "FINANCE",
+        "INTERNAL_AUDIT": "INTERNAL_AUDIT",
+        "INTERNAL_AUDITOR": "INTERNAL_AUDIT",
+        "INTERNALAUDIT": "INTERNAL_AUDIT",
     }
     return aliases.get(normalized, normalized)
 
@@ -113,10 +127,18 @@ def can_transition(status: str, action: str) -> bool:
     return status in VALID_STATUSES and action in STATUS_FLOW.get(status, {})
 
 
-def next_status_for_action(status: str, action: str) -> Optional[str]:
-    """Return the destination state, or ``None`` if the transition is invalid."""
+def next_status_for_action(
+    status: str, action: str, is_administrative: bool = False
+) -> Optional[str]:
+    """Return the destination state, or ``None`` if the transition is invalid.
+
+    Administrative activities bypass intermediate approval stages (Supervisor, M&E,
+    Program Lead, and Executive Director) and transition directly to Finance review.
+    """
     if not can_transition(status, action):
         return None
+    if is_administrative and action in ("SUBMIT", "RESUBMIT"):
+        return "PENDING_FINANCE"
     return STATUS_FLOW[status][action]
 
 
@@ -131,14 +153,10 @@ def validate_action_permission(role: str, status: str, action: str) -> bool:
         return False
     if not can_transition(status, action):
         return False
-    if normalized_role == "ADMIN":
-        return True
     if action in ("SUBMIT", "RESUBMIT"):
         return normalized_role == "EMPLOYEE"
-    if action == "SUBMIT_ACCOUNTABILITY":
-        return normalized_role == "EMPLOYEE" or normalized_role == "FINANCE"
     if action == "FINALIZE_ACCOUNTABILITY":
-        return normalized_role == "FINANCE" and status == "AWAITING_ACCOUNTABILITY"
+        return normalized_role == "INTERNAL_AUDIT" and status == "AWAITING_ACCOUNTABILITY"
     return ROLE_STAGE_MAP.get(normalized_role) == status
 
 

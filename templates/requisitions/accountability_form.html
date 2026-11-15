@@ -6,7 +6,7 @@
   <a class="back-link" href="{% url 'requisition-detail' requisition.pk %}">← Back to request</a>
   <p class="eyebrow">POST-DISBURSEMENT</p>
   <h1>Submit accountability</h1>
-  <p class="muted">Request: {{ requisition.title }} · {{ requisition.currency }} {{ requisition.amount|floatformat:2 }}</p>
+  <p class="muted">Request: {{ requisition.title }} · {{ requisition.currency }} {{ requisition.amount|floatformat:2 }}. Any unspent balance is calculated from your reported spend and reconciled at close.</p>
   <section class="panel form-panel">
     <form method="post" enctype="multipart/form-data">
       {% csrf_token %}

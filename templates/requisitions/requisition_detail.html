@@ -9,31 +9,64 @@
 <div class="detail-grid">
   <section class="panel">
     <div class="panel-heading"><div><p class="eyebrow">REQUEST DETAILS</p><h2>Summary</h2></div>
-    {% if can_edit %}<a class="button secondary" href="{% url 'requisition-edit' requisition.pk %}">Edit</a>{% endif %}</div>
+    <div>{% if can_download_form %}<a class="button secondary" href="{% url 'requisition-download' requisition.pk %}">Download form (PDF)</a>{% endif %}{% if can_edit %}<a class="button secondary" href="{% url 'requisition-edit' requisition.pk %}">Edit</a>{% endif %}</div></div>
     <dl class="details">
+      <div><dt>Activity</dt><dd>{{ requisition.get_activity_type_display }}</dd></div>
       <div><dt>Amount</dt><dd>{{ requisition.currency }} {{ requisition.amount|floatformat:2 }}</dd></div>
-      <div><dt>Project</dt><dd>{{ requisition.project.code }} · {{ requisition.project.name }}</dd></div>
-      <div><dt>Budget line</dt><dd>{{ requisition.budget_line.code }} · {{ requisition.budget_line.category }}</dd></div>
+      {% if requisition.voucher_number %}<div><dt>Voucher reference</dt><dd>{{ requisition.voucher_number }}</dd></div>{% endif %}
+      {% if requisition.disbursement_method %}<div><dt>Payment method</dt><dd>{{ requisition.get_disbursement_method_display }}</dd></div>{% endif %}
       <div><dt>Department</dt><dd>{{ requisition.department|default:"—" }}</dd></div>
-      <div><dt>Due date</dt><dd>{{ requisition.due_date|date:"M j, Y"|default:"—" }}</dd></div>
       <div class="wide"><dt>Purpose and justification</dt><dd class="preserve-lines">{{ requisition.description }}</dd></div>
+      {% if not requisition.is_administrative %}
+        <div><dt>Date of the activity</dt><dd>{{ requisition.activity_date|date:"M j, Y"|default:"—" }}</dd></div>
+        <div><dt>Team lead</dt><dd>{{ requisition.team_lead|default:"—" }}</dd></div>
+        <div><dt>Impact</dt><dd class="preserve-lines">{{ requisition.impact|default:"—" }}</dd></div>
+        <div><dt>Program</dt><dd>{{ requisition.program|default:"—" }}</dd></div>
+        <div class="wide"><dt>Indicator</dt><dd class="preserve-lines">{{ requisition.indicator }}</dd></div>
+        <div class="wide"><dt>Overview of the activity</dt><dd class="preserve-lines">{{ requisition.activity_overview|default:"—" }}</dd></div>
+        <div class="wide"><dt>Expected outcomes</dt><dd class="preserve-lines">{{ requisition.expected_outcomes|default:"—" }}</dd></div>
+        <div class="wide"><dt>Expected outputs</dt><dd class="preserve-lines">{{ requisition.expected_outputs|default:"—" }}</dd></div>
+        <div><dt>Target number</dt><dd>{{ requisition.target_number|default:"—" }}</dd></div>
+        <div class="wide"><dt>Inputs</dt><dd class="preserve-lines">{{ requisition.inputs|default:"—" }}</dd></div>
+        <div class="wide"><dt>Other staff</dt><dd class="preserve-lines">{{ requisition.other_staff|default:"—" }}</dd></div>
+        <div class="wide"><dt>Risk assessment and mitigation</dt><dd class="preserve-lines">{{ requisition.risk_assessment|default:"—" }}</dd></div>
+        <div class="wide"><dt>Reporting strategy</dt><dd class="preserve-lines">{{ requisition.reporting_strategy|default:"—" }}</dd></div>
+      {% endif %}
       {% if requisition.last_comment %}<div class="wide"><dt>Latest comment</dt><dd class="preserve-lines">{{ requisition.last_comment }}</dd></div>{% endif %}
       {% if requisition.rejection_reason %}<div class="wide"><dt>Rejection reason</dt><dd class="preserve-lines">{{ requisition.rejection_reason }}</dd></div>{% endif %}
     </dl>
+    {% if requisition.items.all %}
+      <div class="table-wrap budget-detail-wrap">
+        <table>
+          <thead><tr><th>Item</th><th>Qty</th><th>Unit cost (UGX)</th><th>Total cost (UGX)</th></tr></thead>
+          <tbody>{% for item in requisition.items.all %}<tr><td>{{ item.item_description }}</td><td>{{ item.quantity }}</td><td>{{ item.unit_cost|floatformat:2 }}</td><td>{{ item.total_cost|floatformat:2 }}</td></tr>{% endfor %}</tbody>
+          <tfoot><tr><th colspan="3">Total budget</th><th>{{ requisition.amount|floatformat:2 }}</th></tr></tfoot>
+        </table>
+      </div>
+    {% endif %}
   </section>
   {% if allowed_actions %}
   <section class="panel action-panel">
     <p class="eyebrow">NEXT STEP</p><h2>Take action</h2>
     {% if "SUBMIT_ACCOUNTABILITY" in allowed_actions %}
       <a class="button primary full" href="{% url 'accountability-create' requisition.pk %}">Submit accountability evidence</a>
-    {% else %}
+    {% endif %}
+    {% if "SUBMIT_ACCOUNTABILITY" not in allowed_actions or allowed_actions|length > 1 %}
       <form method="post" action="{% url 'requisition-action' requisition.pk %}">
         {% csrf_token %}
         {% if "REQUEST_REVISION" in allowed_actions or "REJECT" in allowed_actions %}<label for="comments">Comment</label><textarea id="comments" name="comments" rows="3" placeholder="Add context for this action"></textarea>{% endif %}
+        {% if "APPROVE" in allowed_actions and requisition.status == "PENDING_FINANCE" %}
+          <label for="disbursement-method">Disbursement method</label>
+          <select id="disbursement-method" name="disbursement_method" required>
+            <option value="">Select payment method</option>
+            <option value="BANK_TRANSFER">Bank transfer</option>
+            <option value="PETTY_CASH">Petty cash</option>
+          </select>
+        {% endif %}
         <div class="action-buttons">
           {% for action in allowed_actions %}
             {% if action != "SUBMIT_ACCOUNTABILITY" %}
-              <button class="button {% if action == 'REJECT' %}danger{% else %}primary{% endif %}" name="action" value="{{ action }}" type="submit">{% if action == "REQUEST_REVISION" %}Request Revision{% elif action == "FINALIZE_ACCOUNTABILITY" %}Finalize Accountability{% elif action == "RESUBMIT" %}Submit{% else %}{{ action|title }}{% endif %}</button>
+              <button class="button {% if action == 'REJECT' %}danger{% else %}primary{% endif %}" name="action" value="{{ action }}" type="submit"{% if action == "REQUEST_REVISION" or action == "REJECT" %} formnovalidate{% endif %}>{% if action == "REQUEST_REVISION" %}Request Revision{% elif action == "FINALIZE_ACCOUNTABILITY" %}Validate and Close{% elif action == "APPROVE" and requisition.status == "PENDING_FINANCE" %}Disburse funds{% elif action == "RESUBMIT" %}Submit{% else %}{{ action|title }}{% endif %}</button>
             {% endif %}
           {% endfor %}
         </div>
@@ -48,6 +81,7 @@
   <p class="eyebrow">LIQUIDATION</p><h2>Accountability submission</h2>
   <dl class="details">
     <div><dt>Actual spend</dt><dd>{{ requisition.currency }} {{ accountability.actual_amount_spent|floatformat:2 }}</dd></div>
+    <div><dt>Unspent balance</dt><dd>{{ requisition.currency }} {{ accountability.unspent_amount|floatformat:2 }}</dd></div>
     <div><dt>Submitted</dt><dd>{{ accountability.submitted_at|date:"M j, Y H:i" }}</dd></div>
     <div class="wide"><dt>Activity report</dt><dd class="preserve-lines">{{ accountability.activity_report }}</dd></div>
     {% if accountability.receipt_file %}<div><dt>Receipt</dt><dd><a href="{% url 'protected-file' 'receipt' accountability.pk %}">Download receipt</a></dd></div>{% endif %}

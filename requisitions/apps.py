@@ -8,3 +8,8 @@ class RequisitionsConfig(AppConfig):
 
     default_auto_field = "django.db.models.BigAutoField"
     name = "requisitions"
+
+    def ready(self):
+        from requisitions.cache import register_cache_signals
+
+        register_cache_signals()
