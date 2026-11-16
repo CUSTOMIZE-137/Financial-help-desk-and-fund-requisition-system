@@ -45,7 +45,20 @@ python manage.py runserver
 
 By default, the app uses SQLite at `db.sqlite3` and local development settings. Sign in at `http://127.0.0.1:8000/admin/` with the superuser, then create staff accounts. Set each account's role and department in the admin before testing the workflow. The dashboard is at `http://127.0.0.1:8000/`.
 
-To configure environment variables, copy `.env.example` to `.env` and export its values in your shell. For PostgreSQL, set `DB_ENGINE=django.db.backends.postgresql` and provide `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT`. Set a unique `DJANGO_SECRET_KEY`, `DJANGO_DEBUG=False`, and production `DJANGO_ALLOWED_HOSTS` before deployment. Do not use the example secret outside local development.
+To configure environment variables, copy `.env.example` to `.env` and export its values in your shell. For PostgreSQL, set ` DATABASE_URL` (or `POSTGRES_URL`) or set `DB_ENGINE=django.db.backends.postgresql` and provide `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT`. Set a unique `DJANGO_SECRET_KEY`, `DJANGO_DEBUG=False`, and production `DJANGO_ALLOWED_HOSTS` before deployment. Do not use the example secret outside local development.
+
+## Deploying on Vercel
+
+The repository includes `vercel.json` and `build_files.sh` for serverless deployment on Vercel:
+
+1. **Import the repository** into Vercel.
+2. **Configure Environment Variables** in your Vercel Project Settings:
+   - `DJANGO_SECRET_KEY` — a strong random secret key.
+   - `DJANGO_DEBUG` — `False` (defaults to `False` automatically when `VERCEL=1`).
+   - `DATABASE_URL` or `POSTGRES_URL` — your managed PostgreSQL connection string (e.g., Vercel Postgres / Neon or Supabase pooler URL), or `DB_ENGINE`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`.
+   - `AWS_STORAGE_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_S3_ENDPOINT_URL` / `AWS_S3_REGION_NAME` — S3-compatible object storage (e.g., AWS S3, Cloudflare R2, or Supabase Storage) for receipt, invoice, and attachment uploads.
+   - `RUN_MIGRATIONS_ON_BUILD` — set to `true` to run `python manage.py migrate --noinput` automatically during Vercel builds.
+3. **Deploy**: Vercel will execute `build_files.sh` to collect static assets into `staticfiles_build/static` and serve the Django WSGI application via `financial_helpdesk/wsgi.py`.
 
 ## Enrolling Users on Deployment
 

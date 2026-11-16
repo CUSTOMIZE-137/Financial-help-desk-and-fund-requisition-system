@@ -21,6 +21,8 @@ htmlcov/
 *.log
 media/
 staticfiles/
+staticfiles_build/
+.vercel/
 db.sqlite3
 
 # Editors and OS

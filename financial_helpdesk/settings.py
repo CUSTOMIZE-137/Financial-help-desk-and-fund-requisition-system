@@ -1,8 +1,9 @@
 """Project configuration, with local SQLite defaults and environment overrides."""
 
+import importlib.util
 import os
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -10,8 +11,15 @@ from financial_helpdesk.storage import build_storages_setting
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Detect Vercel serverless runtime to apply production-safe defaults automatically.
+IS_VERCEL = os.getenv("VERCEL", "").lower() in {"1", "true"} or bool(
+    os.getenv("VERCEL_ENV")
+)
+
 # Read environment configuration without requiring a dotenv dependency.
-DEBUG = os.getenv("DJANGO_DEBUG", os.getenv("DEBUG", "True")).lower() in {
+# Default DEBUG to False on Vercel unless explicitly overridden.
+_default_debug = "False" if IS_VERCEL else "True"
+DEBUG = os.getenv("DJANGO_DEBUG", os.getenv("DEBUG", _default_debug)).lower() in {
     "1",
     "true",
     "yes",
@@ -22,13 +30,31 @@ if not SECRET_KEY:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG is false.")
     SECRET_KEY = "local-development-only-change-before-deployment"
 
+# Allow localhost for development and .vercel.app preview/production domains.
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.getenv(
-        "DJANGO_ALLOWED_HOSTS", os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1")
+        "DJANGO_ALLOWED_HOSTS",
+        os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,.vercel.app"),
     ).split(",")
     if host.strip()
 ]
+if os.getenv("VERCEL_URL") and os.getenv("VERCEL_URL") not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(os.getenv("VERCEL_URL"))
+
+# Trust HTTPS origins on Vercel so CSRF-protected POST requests succeed.
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "DJANGO_CSRF_TRUSTED_ORIGINS",
+        os.getenv("CSRF_TRUSTED_ORIGINS", "https://*.vercel.app"),
+    ).split(",")
+    if origin.strip()
+]
+if os.getenv("VERCEL_URL"):
+    _vercel_origin = f"https://{os.getenv('VERCEL_URL')}"
+    if _vercel_origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(_vercel_origin)
 
 # Register Django's built-ins, the REST API, and the requisition domain app.
 INSTALLED_APPS = [
@@ -44,6 +70,12 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Serve static assets via WhiteNoise when installed in the runtime environment.
+    *(
+        ["whitenoise.middleware.WhiteNoiseMiddleware"]
+        if importlib.util.find_spec("whitenoise") is not None
+        else []
+    ),
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -78,47 +110,59 @@ WSGI_APPLICATION = "financial_helpdesk.wsgi.application"
 ASGI_APPLICATION = "financial_helpdesk.asgi.application"
 
 
-def _build_postgres_options() -> dict:
+def _build_postgres_options(query_sslmode: str = "") -> dict:
+    """Build PostgreSQL connection options including timeout and optional SSL mode."""
     options = {"connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "10"))}
-    sslmode = os.getenv("DB_SSLMODE", "").strip()
+    sslmode = os.getenv("DB_SSLMODE", "").strip() or query_sslmode
     if sslmode:
         options["sslmode"] = sslmode
     return options
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+def _database_from_url(database_url: str) -> dict:
+    """Parse a PostgreSQL or SQLite connection URL into a Django DATABASES config."""
+    parsed = urlparse(database_url)
+    scheme = parsed.scheme.split("+", 1)[0].lower()
+    if scheme in {"postgres", "postgresql", "pgsql"}:
+        query = parse_qs(parsed.query)
+        query_sslmode = query["sslmode"][0] if "sslmode" in query and query["sslmode"] else ""
+        return {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": unquote(parsed.path.lstrip("/")) or "financial_helpdesk",
+            "USER": unquote(parsed.username or ""),
+            "PASSWORD": unquote(parsed.password or ""),
+            "HOST": parsed.hostname or "localhost",
+            "PORT": str(parsed.port or "5432"),
+            "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "0" if IS_VERCEL else "60")),
+            "CONN_HEALTH_CHECKS": os.getenv("DB_CONN_HEALTH_CHECKS", "True").lower()
+            in {"1", "true", "yes"},
+            "OPTIONS": _build_postgres_options(query_sslmode),
+        }
+    if scheme == "sqlite":
+        db_path = unquote(parsed.path)
+        if db_path in {"", "/", "/:memory:"}:
+            name = ":memory:"
+        else:
+            name = db_path.lstrip("/") if not db_path.startswith("//") else db_path[1:]
+        return {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": name or str(BASE_DIR / "db.sqlite3"),
+        }
+    raise ImproperlyConfigured(f"Unsupported database URL scheme: {parsed.scheme}")
+
+
+DATABASE_URL = (os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or "").strip()
 DATABASE_ENGINE = os.getenv("DB_ENGINE", "").strip()
-DB_CONN_MAX_AGE = int(os.getenv("DB_CONN_MAX_AGE", "60"))
+DB_CONN_MAX_AGE = int(os.getenv("DB_CONN_MAX_AGE", "0" if IS_VERCEL else "60"))
 DB_CONN_HEALTH_CHECKS = os.getenv("DB_CONN_HEALTH_CHECKS", "True").lower() in {
     "1",
     "true",
     "yes",
 }
 
-# Support DATABASE_URL (postgres:// or sqlite://), explicit DB_ENGINE, or local SQLite.
+# Support DATABASE_URL/POSTGRES_URL, explicit DB_ENGINE, or local SQLite.
 if DATABASE_URL:
-    parsed_db = urlparse(DATABASE_URL)
-    if parsed_db.scheme in ("postgres", "postgresql", "pgsql"):
-        DATABASES = {
-            "default": {
-                "ENGINE": "django.db.backends.postgresql",
-                "NAME": unquote(parsed_db.path.lstrip("/")) or "financial_helpdesk",
-                "USER": unquote(parsed_db.username or ""),
-                "PASSWORD": unquote(parsed_db.password or ""),
-                "HOST": parsed_db.hostname or "localhost",
-                "PORT": str(parsed_db.port or 5432),
-                "CONN_MAX_AGE": DB_CONN_MAX_AGE,
-                "CONN_HEALTH_CHECKS": DB_CONN_HEALTH_CHECKS,
-                "OPTIONS": _build_postgres_options(),
-            }
-        }
-    else:
-        DATABASES = {
-            "default": {
-                "ENGINE": "django.db.backends.sqlite3",
-                "NAME": unquote(parsed_db.path.lstrip("/")) or str(BASE_DIR / "db.sqlite3"),
-            }
-        }
+    DATABASES = {"default": _database_from_url(DATABASE_URL)}
 elif DATABASE_ENGINE:
     if DATABASE_ENGINE == "django.db.backends.sqlite3":
         DATABASES = {
@@ -251,6 +295,11 @@ WORKFLOW_EMAIL_NOTIFICATIONS = os.getenv(
     "WORKFLOW_EMAIL_NOTIFICATIONS", "False"
 ).lower() in {"1", "true", "yes"}
 
+# Vercel serverless functions have a 4.5 MB request body limit; default to 4 MB on Vercel.
+MAX_UPLOAD_SIZE_MB = int(
+    os.getenv("MAX_UPLOAD_SIZE_MB", "4" if IS_VERCEL else "15")
+)
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGIN_URL = "login"
 LOGIN_REDIRECT_URL = "dashboard"
@@ -285,13 +334,8 @@ EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() in {"1", "true", "yes
 EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "False").lower() in {"1", "true", "yes"}
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "noreply@financedesk.local")
 
-CSRF_TRUSTED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
-    if origin.strip()
-]
-
 # Browsers must send session and CSRF cookies over HTTPS outside development.
+# Honor X-Forwarded-Proto from Vercel's edge proxy when determining request.is_secure().
 if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True

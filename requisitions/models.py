@@ -359,8 +359,10 @@ def validate_uploaded_evidence_file(uploaded_file):
     """Validate file size and magic-byte header for supported evidence types."""
     if not uploaded_file:
         return
-    if uploaded_file.size > MAX_UPLOAD_SIZE_BYTES:
-        raise ValidationError("Files must be 15 MB or smaller.")
+    # Respect the runtime upload cap (4 MB on Vercel, 15 MB default) for serverless payload limits.
+    max_upload_mb = getattr(settings, "MAX_UPLOAD_SIZE_MB", 15)
+    if uploaded_file.size > max_upload_mb * 1024 * 1024:
+        raise ValidationError(f"Files must be {max_upload_mb} MB or smaller.")
     name = getattr(uploaded_file, "name", "") or ""
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
     expected_prefixes = FILE_SIGNATURES.get(ext)

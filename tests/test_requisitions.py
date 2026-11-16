@@ -705,11 +705,13 @@ class RequisitionWorkflowTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("newstaff", mail.outbox[0].body)
 
+        from django.utils.html import escape
+
         match = re.search(r"Temporary Password:\s*(\S+)", mail.outbox[0].body)
         self.assertIsNotNone(match)
         temp_password = match.group(1)
         self.assertTrue(enrolled_user.check_password(temp_password))
-        self.assertContains(response, temp_password)
+        self.assertContains(response, escape(temp_password))
 
         # Enrolled user signs in with temporary password and is redirected to password reset
         self.client.logout()
@@ -923,5 +925,37 @@ class RequisitionWorkflowTests(TestCase):
         self.assertEqual(fav_resp.status_code, 302)
         self.assertEqual(fav_resp["Location"], "/static/images/favicon.ico")
 
+    def test_vercel_wsgi_app_and_database_url_parser(self):
+        """Expose the WSGI app variable and parse PostgreSQL URLs for Vercel."""
+        from financial_helpdesk import settings as project_settings
+        from financial_helpdesk import wsgi
 
+        self.assertIs(wsgi.app, wsgi.application)
+        parsed = project_settings._database_from_url(
+            "postgresql://dbuser:s3cret@db.example.com:6543/helpdesk?sslmode=require"
+        )
+        self.assertEqual(parsed["ENGINE"], "django.db.backends.postgresql")
+        self.assertEqual(parsed["NAME"], "helpdesk")
+        self.assertEqual(parsed["USER"], "dbuser")
+        self.assertEqual(parsed["PASSWORD"], "s3cret")
+        self.assertEqual(parsed["HOST"], "db.example.com")
+        self.assertEqual(parsed["PORT"], "6543")
+        self.assertEqual(parsed["OPTIONS"]["sslmode"], "require")
 
+    @override_settings(MAX_UPLOAD_SIZE_MB=1)
+    def test_configurable_max_upload_size_limit(self):
+        """Respect MAX_UPLOAD_SIZE_MB when validating uploaded files."""
+        oversized = SimpleUploadedFile(
+            "large.pdf",
+            b"%PDF-1.4 " + (b"x" * (1024 * 1024 + 64)),
+            content_type="application/pdf",
+        )
+        submission = AccountabilitySubmission(
+            requisition=self.requisition,
+            submitted_by=self.employee,
+            actual_amount_spent=Decimal("100.00"),
+            activity_report="Completed.",
+            receipt_file=oversized,
+        )
+        with self.assertRaisesMessage(ValidationError, "Files must be 1 MB or smaller."):
+            submission.full_clean()
