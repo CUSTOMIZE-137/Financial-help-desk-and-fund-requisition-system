@@ -7,7 +7,6 @@ set -o errexit
 BUILD_VENV=".vercel-build-venv"
 python3 -m venv "$BUILD_VENV"
 PYTHON_BIN="$BUILD_VENV/bin/python"
-"$PYTHON_BIN" -m pip install --upgrade pip
 "$PYTHON_BIN" -m pip install -r requirements.txt
 "$PYTHON_BIN" manage.py collectstatic --noinput --clear
 
