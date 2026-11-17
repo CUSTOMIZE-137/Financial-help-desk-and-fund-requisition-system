@@ -36,3 +36,4 @@ thumbs.db
 # Tooling caches
 node_modules/
 .ipynb_checkpoints/
+.neon

@@ -3,6 +3,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import sys
 from urllib.parse import parse_qs, unquote, urlparse
 
 from django.core.exceptions import ImproperlyConfigured
@@ -10,6 +11,35 @@ from django.core.exceptions import ImproperlyConfigured
 from financial_helpdesk.storage import build_storages_setting
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_dotenv_files(*filenames: str) -> None:
+    """Load key=value pairs from .env.local / .env without overriding existing process env."""
+    for filename in filenames:
+        env_path = BASE_DIR / filename
+        if not env_path.is_file():
+            continue
+        try:
+            content = env_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+# Load Neon-pulled .env.local and .env files automatically when present.
+_load_dotenv_files(".env.local", ".env")
 
 # Detect Vercel serverless runtime to apply production-safe defaults automatically.
 IS_VERCEL = os.getenv("VERCEL", "").lower() in {"1", "true"} or bool(
@@ -110,12 +140,14 @@ WSGI_APPLICATION = "financial_helpdesk.wsgi.application"
 ASGI_APPLICATION = "financial_helpdesk.asgi.application"
 
 
-def _build_postgres_options(query_sslmode: str = "") -> dict:
-    """Build PostgreSQL connection options including timeout and optional SSL mode."""
+def _build_postgres_options(query_sslmode: str = "", query_channel_binding: str = "") -> dict:
+    """Build PostgreSQL connection options including timeout, SSL mode, and channel binding."""
     options = {"connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "10"))}
     sslmode = os.getenv("DB_SSLMODE", "").strip() or query_sslmode
     if sslmode:
         options["sslmode"] = sslmode
+    if query_channel_binding:
+        options["channel_binding"] = query_channel_binding
     return options
 
 
@@ -126,17 +158,29 @@ def _database_from_url(database_url: str) -> dict:
     if scheme in {"postgres", "postgresql", "pgsql"}:
         query = parse_qs(parsed.query)
         query_sslmode = query["sslmode"][0] if "sslmode" in query and query["sslmode"] else ""
+        query_channel_binding = (
+            query["channel_binding"][0]
+            if "channel_binding" in query and query["channel_binding"]
+            else ""
+        )
+        host = parsed.hostname or "localhost"
+        is_pooled = "-pooler." in host
         return {
             "ENGINE": "django.db.backends.postgresql",
             "NAME": unquote(parsed.path.lstrip("/")) or "financial_helpdesk",
             "USER": unquote(parsed.username or ""),
             "PASSWORD": unquote(parsed.password or ""),
-            "HOST": parsed.hostname or "localhost",
+            "HOST": host,
             "PORT": str(parsed.port or "5432"),
-            "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "0" if IS_VERCEL else "60")),
+            # Neon pooled (-pooler) endpoints use PgBouncer in transaction mode; disable
+            # server-side cursors and reset connection age on serverless runtimes.
+            "CONN_MAX_AGE": int(
+                os.getenv("DB_CONN_MAX_AGE", "0" if (IS_VERCEL or is_pooled) else "60")
+            ),
             "CONN_HEALTH_CHECKS": os.getenv("DB_CONN_HEALTH_CHECKS", "True").lower()
             in {"1", "true", "yes"},
-            "OPTIONS": _build_postgres_options(query_sslmode),
+            "DISABLE_SERVER_SIDE_CURSORS": is_pooled,
+            "OPTIONS": _build_postgres_options(query_sslmode, query_channel_binding),
         }
     if scheme == "sqlite":
         db_path = unquote(parsed.path)
@@ -151,7 +195,28 @@ def _database_from_url(database_url: str) -> dict:
     raise ImproperlyConfigured(f"Unsupported database URL scheme: {parsed.scheme}")
 
 
-DATABASE_URL = (os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or "").strip()
+# Per Neon Postgres best practices, schema migrations and session-level commands use the
+# direct connection (DATABASE_URL_UNPOOLED), while web/API traffic uses pooled DATABASE_URL.
+_DIRECT_DB_COMMANDS = {
+    "migrate",
+    "makemigrations",
+    "sqlmigrate",
+    "squashmigrations",
+    "dbshell",
+    "dumpdata",
+    "loaddata",
+}
+_IS_DIRECT_DB_COMMAND = len(sys.argv) > 1 and sys.argv[1] in _DIRECT_DB_COMMANDS
+DATABASE_URL_UNPOOLED = (
+    os.getenv("DATABASE_URL_UNPOOLED") or os.getenv("POSTGRES_URL_NON_POOLING") or ""
+).strip()
+DATABASE_URL = (
+    (DATABASE_URL_UNPOOLED if _IS_DIRECT_DB_COMMAND and DATABASE_URL_UNPOOLED else "")
+    or os.getenv("DATABASE_URL")
+    or os.getenv("POSTGRES_URL")
+    or DATABASE_URL_UNPOOLED
+    or ""
+).strip()
 DATABASE_ENGINE = os.getenv("DB_ENGINE", "").strip()
 DB_CONN_MAX_AGE = int(os.getenv("DB_CONN_MAX_AGE", "0" if IS_VERCEL else "60"))
 DB_CONN_HEALTH_CHECKS = os.getenv("DB_CONN_HEALTH_CHECKS", "True").lower() in {
