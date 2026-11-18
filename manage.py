@@ -4,7 +4,6 @@
 import os
 import sys
 
-
 def main():
     """Load project settings and dispatch the requested management command."""
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "financial_helpdesk.settings")
