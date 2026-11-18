@@ -5,12 +5,16 @@ export default defineConfig({
   auth: false,
   // Branch policy: per-branch tuning
   branch: (branch) => {
-    if (branch.isDefault) {
-      // Default branch: no overrides, uses project defaults
+    if (
+      branch.isDefault ||
+      branch.name === "staging" ||
+      branch.name === "preview"
+    ) {
+      // Default and persistent pre-production (staging/preview) branches: no TTL override
       return {};
     }
     if (!branch.exists) {
-      // New non-default branches: auto-expire
+      // Ephemeral feature/PR preview branches: auto-expire after 7 days
       // Run `neon checkout <name>` to create a new branch with these settings
       return { ttl: "7d" };
     }

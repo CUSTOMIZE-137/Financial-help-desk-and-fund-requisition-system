@@ -60,6 +60,24 @@ The repository includes `vercel.json` and `build_files.sh` for serverless deploy
    - `RUN_MIGRATIONS_ON_BUILD` — set to `true` to run `python manage.py migrate --noinput` automatically during Vercel builds.
 3. **Deploy**: Vercel will execute `build_files.sh` to collect static assets into `staticfiles_build/static` and serve the Django WSGI application via `financial_helpdesk/wsgi.py`.
 
+### Preview / Staging Environment (Pre-Production)
+
+Per [Vercel's Preview Environment (Pre-Production) documentation](https://vercel.com/docs/deployments/environments#preview-environment-pre-production), any push to a non-production Git branch (such as `staging`) or pull request automatically deploys to the **Preview** environment (`VERCEL_ENV=preview`):
+
+1. **Git Branch Setup (`staging`)**:
+   - `main` is the **Production** branch.
+   - `staging` (and any feature/PR branch) triggers a **Preview** deployment with a branch alias (`https://<project>-git-staging-<scope>.vercel.app`) as well as a unique commit URL (`VERCEL_URL`).
+   - `financial_helpdesk/settings.py` automatically trusts `VERCEL_URL`, `VERCEL_BRANCH_URL`, and `VERCEL_PROJECT_PRODUCTION_URL` in `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS`, sets `SITE_URL` to the preview branch URL when not overridden, isolates S3 uploads under `preview/media/` by default, and disables `SECURE_HSTS_PRELOAD` on preview domains.
+
+2. **Preview-Scoped Environment Variables**:
+   In **Vercel Dashboard → Project Settings → Environment Variables**, add variables scoped to **Preview** (and optionally restricted to the `staging` Git branch):
+   - `DATABASE_URL` / `DATABASE_URL_UNPOOLED` — connection strings for your isolated Neon `staging` branch (`neon.ts` keeps `staging` and `preview` branches persistent while expiring ephemeral feature branches after 7 days).
+   - `DJANGO_SECRET_KEY` — a separate secret key for pre-production.
+   - `WORKFLOW_EMAIL_NOTIFICATIONS` — `False` (or point `EMAIL_HOST` to a sandbox SMTP sink such as Mailpit/Mailtrap so staging tests do not email real staff).
+
+3. **Custom Staging Domain (Optional)**:
+   In **Vercel Dashboard → Project Settings → Domains** (or **Environments**), assign a pre-production domain (e.g., `staging.financedesk.example.org`) and link it to the `staging` Git branch, then add that hostname to `DJANGO_ALLOWED_HOSTS` and `https://staging.financedesk.example.org` to `CSRF_TRUSTED_ORIGINS` for the Preview environment.
+
 ## Enrolling Users on Deployment
 
 Administrators can enroll staff accounts with cryptographically generated temporary credentials, send invitation emails, and enforce a mandatory password change on first sign-in using either the **Admin Enrollment Web Interface** or the **CLI Management Script**:

@@ -41,9 +41,14 @@ def _load_dotenv_files(*filenames: str) -> None:
 # Load Neon-pulled .env.local and .env files automatically when present.
 _load_dotenv_files(".env.local", ".env")
 
-# Detect Vercel serverless runtime to apply production-safe defaults automatically.
+# Detect Vercel serverless runtime and target environment ("production", "preview", "development").
 IS_VERCEL = os.getenv("VERCEL", "").lower() in {"1", "true"} or bool(
     os.getenv("VERCEL_ENV")
+)
+VERCEL_ENV = os.getenv("VERCEL_ENV", "").strip().lower()
+VERCEL_TARGET_ENV = os.getenv("VERCEL_TARGET_ENV", VERCEL_ENV).strip().lower()
+IS_VERCEL_PREVIEW = VERCEL_ENV == "preview" or (
+    bool(VERCEL_TARGET_ENV) and VERCEL_TARGET_ENV not in {"production", "development"}
 )
 
 # Read environment configuration without requiring a dotenv dependency.
@@ -69,10 +74,20 @@ ALLOWED_HOSTS = [
     ).split(",")
     if host.strip()
 ]
-if os.getenv("VERCEL_URL") and os.getenv("VERCEL_URL") not in ALLOWED_HOSTS:
-    ALLOWED_HOSTS.append(os.getenv("VERCEL_URL"))
+# Automatically register Vercel system URLs for unique preview deployments,
+# Git branch staging aliases (VERCEL_BRANCH_URL), and production domains.
+_VERCEL_HOST_ENV_VARS = (
+    "VERCEL_URL",
+    "VERCEL_BRANCH_URL",
+    "VERCEL_PROJECT_PRODUCTION_URL",
+)
+for _host_var in _VERCEL_HOST_ENV_VARS:
+    _vercel_host = os.getenv(_host_var, "").strip()
+    if _vercel_host and _vercel_host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_vercel_host)
 
-# Trust HTTPS origins on Vercel so CSRF-protected POST requests succeed.
+# Trust HTTPS origins on Vercel so CSRF-protected POST requests succeed across
+# Production, Preview (branch/PR URLs), and Custom Staging domains.
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -81,10 +96,12 @@ CSRF_TRUSTED_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
-if os.getenv("VERCEL_URL"):
-    _vercel_origin = f"https://{os.getenv('VERCEL_URL')}"
-    if _vercel_origin not in CSRF_TRUSTED_ORIGINS:
-        CSRF_TRUSTED_ORIGINS.append(_vercel_origin)
+for _host_var in _VERCEL_HOST_ENV_VARS:
+    _vercel_host = os.getenv(_host_var, "").strip()
+    if _vercel_host:
+        _vercel_origin = f"https://{_vercel_host}"
+        if _vercel_origin not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(_vercel_origin)
 
 # Register Django's built-ins, the REST API, and the requisition domain app.
 INSTALLED_APPS = [
@@ -338,7 +355,10 @@ AWS_S3_REGION_NAME = os.getenv("AWS_S3_REGION_NAME", "us-east-1").strip()
 AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL", "").strip() or None
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "").strip() or None
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip() or None
-AWS_LOCATION = os.getenv("AWS_LOCATION", "media").strip("/")
+AWS_LOCATION = os.getenv(
+    "AWS_LOCATION",
+    "preview/media" if IS_VERCEL_PREVIEW else "media",
+).strip("/")
 AWS_S3_CUSTOM_DOMAIN = os.getenv("AWS_S3_CUSTOM_DOMAIN", "").strip()
 AWS_QUERYSTRING_AUTH = os.getenv("AWS_QUERYSTRING_AUTH", "True").lower() in {
     "1",
@@ -384,7 +404,16 @@ REST_FRAMEWORK = {
 }
 
 # Email and site URL configuration for user enrollment invitations.
-SITE_URL = os.getenv("SITE_URL", "http://127.0.0.1:8000")
+# On Vercel Preview / Staging, automatically default SITE_URL to the branch/preview URL.
+_default_vercel_host = (
+    (os.getenv("VERCEL_BRANCH_URL") or os.getenv("VERCEL_URL") or "").strip()
+    if IS_VERCEL_PREVIEW
+    else (os.getenv("VERCEL_PROJECT_PRODUCTION_URL") or os.getenv("VERCEL_URL") or "").strip()
+)
+SITE_URL = os.getenv(
+    "SITE_URL",
+    f"https://{_default_vercel_host}" if _default_vercel_host else "http://127.0.0.1:8000",
+)
 EMAIL_HOST = os.getenv("EMAIL_HOST", "")
 EMAIL_BACKEND = os.getenv(
     "EMAIL_BACKEND",
@@ -415,7 +444,9 @@ if not DEBUG:
     }
     SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "31536000"))
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
+    SECURE_HSTS_PRELOAD = os.getenv(
+        "SECURE_HSTS_PRELOAD", "False" if IS_VERCEL_PREVIEW else "True"
+    ).lower() in {"1", "true", "yes"}
 
 # Structured operational logging.
 LOG_LEVEL = os.getenv("DJANGO_LOG_LEVEL", "INFO").upper()
